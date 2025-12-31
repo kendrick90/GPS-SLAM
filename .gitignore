@@ -8,4 +8,5 @@ build/
 ThirdLibs/
 output/
 __pycache__/
-data/
+data/ThirdLibs.zip
+cuda-keyring_1.1-1_all.deb
