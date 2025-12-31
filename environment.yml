@@ -8,16 +8,11 @@ dependencies:
   # Python
   - python=3.9
 
-  # Build tools
-  - gcc=11
-  - gxx=11
+  # Build tools (from conda for portability)
   - cmake
   - make
 
-  # CUDA
-  - pytorch-cuda=11.8
-
-  # Python packages (via pip for CUDA-accelerated versions)
+  # Python packages
   - pip
   - pip:
     - torch --extra-index-url https://download.pytorch.org/whl/cu118
@@ -25,3 +20,25 @@ dependencies:
     - numpy
     - opencv-python
     - tqdm
+
+# ============================================================
+# SYSTEM REQUIREMENTS (not managed by conda)
+# ============================================================
+# The following must be installed on your system:
+#
+# 1. CUDA Toolkit 11.8
+#    Ubuntu/Debian: sudo apt install cuda-toolkit-11-8
+#    Or download from: https://developer.nvidia.com/cuda-11-8-0-download-archive
+#
+# 2. GCC 11 (CUDA 11.8 requires GCC <= 11)
+#    Ubuntu/Debian: sudo apt install gcc-11 g++-11
+#
+# 3. OpenGL development libraries
+#    Ubuntu/Debian: sudo apt install libgl1-mesa-dev libglx-dev libopengl-dev freeglut3-dev
+#
+# 4. Other build dependencies
+#    Ubuntu/Debian: sudo apt install libopencv-dev libprotobuf-dev protobuf-compiler libboost-all-dev
+#
+# After creating the conda environment, the activation script will automatically
+# set up CUDA_HOME, CC, CXX environment variables for building.
+# ============================================================
