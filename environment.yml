@@ -1,0 +1,27 @@
+name: gps-slam
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # Python
+  - python=3.9
+
+  # Build tools
+  - gcc=11
+  - gxx=11
+  - cmake
+  - make
+
+  # CUDA
+  - pytorch-cuda=11.8
+
+  # Python packages (via pip for CUDA-accelerated versions)
+  - pip
+  - pip:
+    - torch --extra-index-url https://download.pytorch.org/whl/cu118
+    - torchvision --extra-index-url https://download.pytorch.org/whl/cu118
+    - numpy
+    - opencv-python
+    - tqdm

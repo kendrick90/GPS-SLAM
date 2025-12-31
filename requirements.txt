@@ -1,0 +1,12 @@
+# GPS-SLAM Python dependencies
+# Install with: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+
+# PyTorch with CUDA 11.8
+torch
+torchvision
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# Data processing
+numpy
+opencv-python
+tqdm
