@@ -5,8 +5,18 @@
 build/
 .idea/
 .vscode/
+
+# Large dependencies and data
 ThirdLibs/
+data/
 output/
+
+# Python
 __pycache__/
-data/ThirdLibs.zip
-cuda-keyring_1.1-1_all.deb
+*.pyc
+.venv/
+venv/
+
+# Downloaded files
+*.zip
+*.deb
