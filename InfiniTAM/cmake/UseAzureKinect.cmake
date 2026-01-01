@@ -5,22 +5,44 @@
 OPTION(WITH_AZUREKINECT "Build with Azure Kinect support" ON)
 
 IF(WITH_AZUREKINECT)
-    # Try to find k4a library
-    FIND_PATH(K4A_INCLUDE_DIR k4a/k4a.h
-        PATHS
-            /usr/include
-            /usr/local/include
-            ${K4A_ROOT}/include
-    )
-
-    FIND_LIBRARY(K4A_LIBRARY
-        NAMES k4a
-        PATHS
-            /usr/lib
-            /usr/lib/x86_64-linux-gnu
-            /usr/local/lib
-            ${K4A_ROOT}/lib
-    )
+    # Try to find k4a library - cross-platform paths
+    IF(WIN32)
+        # Windows: Azure Kinect SDK default install location
+        SET(K4A_DEFAULT_ROOT "C:/Program Files/Azure Kinect SDK v1.4.1")
+        FIND_PATH(K4A_INCLUDE_DIR k4a/k4a.h
+            PATHS
+                "${K4A_DEFAULT_ROOT}/sdk/include"
+                "$ENV{K4A_ROOT}/sdk/include"
+                "${K4A_ROOT}/sdk/include"
+        )
+        FIND_LIBRARY(K4A_LIBRARY
+            NAMES k4a
+            PATHS
+                "${K4A_DEFAULT_ROOT}/sdk/windows-desktop/amd64/release/lib"
+                "$ENV{K4A_ROOT}/sdk/windows-desktop/amd64/release/lib"
+                "${K4A_ROOT}/sdk/windows-desktop/amd64/release/lib"
+        )
+        # Store DLL path for runtime
+        SET(K4A_DLL_DIR "${K4A_DEFAULT_ROOT}/sdk/windows-desktop/amd64/release/bin" CACHE PATH "Azure Kinect DLL directory")
+    ELSE()
+        # Linux paths
+        FIND_PATH(K4A_INCLUDE_DIR k4a/k4a.h
+            PATHS
+                /usr/include
+                /usr/local/include
+                ${K4A_ROOT}/include
+                $ENV{K4A_ROOT}/include
+        )
+        FIND_LIBRARY(K4A_LIBRARY
+            NAMES k4a
+            PATHS
+                /usr/lib
+                /usr/lib/x86_64-linux-gnu
+                /usr/local/lib
+                ${K4A_ROOT}/lib
+                $ENV{K4A_ROOT}/lib
+        )
+    ENDIF()
 
     IF(K4A_INCLUDE_DIR AND K4A_LIBRARY)
         MESSAGE(STATUS "Found Azure Kinect SDK:")

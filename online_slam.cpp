@@ -26,6 +26,10 @@
 #include <atomic>
 #include <chrono>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <yaml-cpp/yaml.h>
 #include <torch/torch.h>
 #include <opencv2/opencv.hpp>
@@ -46,11 +50,23 @@ using namespace InfiniTAM::Engine;
 // Global flag for graceful shutdown
 std::atomic<bool> g_shouldStop(false);
 
+#ifdef _WIN32
+// Windows console control handler
+BOOL WINAPI consoleHandler(DWORD signal) {
+    if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT) {
+        std::cout << "\nInterrupt signal received. Stopping...\n";
+        g_shouldStop = true;
+        return TRUE;
+    }
+    return FALSE;
+}
+#else
 void signalHandler(int signum)
 {
     std::cout << "\nInterrupt signal (" << signum << ") received. Stopping...\n";
     g_shouldStop = true;
 }
+#endif
 
 void printUsage(const char* progName)
 {
@@ -68,8 +84,12 @@ void printUsage(const char* progName)
 int main(int argc, char *argv[])
 {
     // Register signal handler for graceful shutdown
+#ifdef _WIN32
+    SetConsoleCtrlHandler(consoleHandler, TRUE);
+#else
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+#endif
 
     // Default parameters
     std::string configFile = "";

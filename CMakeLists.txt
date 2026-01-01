@@ -352,12 +352,19 @@ target_include_directories(online_slam PRIVATE
 if (MSVC)
     file(GLOB TORCH_DLLS "${TORCH_INSTALL_PREFIX}/lib/*.dll")
     file(GLOB OPENCV_DLL "${OPENCV_DIR}/x64/vc16/bin/opencv_world490.dll")
-    set(DLLS_TO_COPY ${TORCH_DLLS} ${OPENCV_DLL})
-    add_custom_command(TARGET opensplat
-        POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${DLLS_TO_COPY}
-        $<TARGET_FILE_DIR:opensplat>)
+    # Azure Kinect DLLs
+    if(K4A_FOUND AND K4A_DLL_DIR)
+        file(GLOB K4A_DLLS "${K4A_DLL_DIR}/*.dll")
+    endif()
+    set(DLLS_TO_COPY ${TORCH_DLLS} ${OPENCV_DLL} ${K4A_DLLS})
+    # Copy DLLs to all executable output directories
+    foreach(TARGET_NAME slam_trainer remote_viewer online_slam)
+        add_custom_command(TARGET ${TARGET_NAME}
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${DLLS_TO_COPY}
+            $<TARGET_FILE_DIR:${TARGET_NAME}>)
+    endforeach()
 endif (MSVC)
 
 add_compile_definitions(GLOG_USE_GLOG_EXPORT)

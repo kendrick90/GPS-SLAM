@@ -133,9 +133,84 @@ Options:
   --output <dir>       Output directory
 ```
 
+## Native Windows Build (Recommended for Production)
+
+Since WSL2 USB passthrough is unreliable for Azure Kinect, building natively on Windows is recommended.
+
+### Prerequisites
+
+1. **Visual Studio 2022** with C++ desktop development workload
+2. **CUDA Toolkit 12.x** - https://developer.nvidia.com/cuda-downloads
+3. **Azure Kinect SDK 1.4.1** - https://github.com/microsoft/Azure-Kinect-Sensor-SDK/releases
+4. **vcpkg** (recommended) or manual dependency installation
+
+### Install Dependencies with vcpkg
+
+```powershell
+# Install vcpkg
+git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+
+# Install dependencies
+C:\vcpkg\vcpkg install eigen3:x64-windows
+C:\vcpkg\vcpkg install opencv4:x64-windows
+C:\vcpkg\vcpkg install yaml-cpp:x64-windows
+C:\vcpkg\vcpkg install protobuf:x64-windows
+C:\vcpkg\vcpkg install freeglut:x64-windows
+C:\vcpkg\vcpkg install pangolin:x64-windows
+```
+
+### Get libtorch (PyTorch C++)
+
+Download from https://pytorch.org/get-started/locally/ - select:
+- PyTorch Build: Stable
+- OS: Windows
+- Package: LibTorch
+- Language: C++/Java
+- Compute Platform: CUDA 12.4
+
+Extract to `C:\libtorch`
+
+### Build Commands
+
+```powershell
+# Open "x64 Native Tools Command Prompt for VS 2022"
+cd GPS-SLAM
+mkdir build
+cd build
+
+# Configure with CMake
+cmake .. -G "Visual Studio 17 2022" -A x64 ^
+    -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+    -DCMAKE_PREFIX_PATH=C:/libtorch ^
+    -DWITH_AZUREKINECT=ON
+
+# Build
+cmake --build . --config Release
+
+# Run
+Release\online_slam.exe --max-frames 100
+```
+
+### Manual Dependency Locations
+
+If not using vcpkg, set these environment variables:
+- `K4A_ROOT` = `C:\Program Files\Azure Kinect SDK v1.4.1`
+- `OPENCV_DIR` = path to OpenCV cmake files
+- `Torch_DIR` = path to libtorch cmake files
+
+### Troubleshooting Windows Build
+
+| Issue | Solution |
+|-------|----------|
+| k4a.lib not found | Set `K4A_ROOT` environment variable |
+| libtorch not found | Add to `CMAKE_PREFIX_PATH` |
+| DLL not found at runtime | DLLs auto-copied by CMake, check build output |
+| CUDA not detected | Ensure CUDA bin is in PATH |
+
 ## Next Steps
 
-1. Verify Azure Kinect works on Windows
-2. If Windows works, try again in WSL after fresh reboot
-3. If WSL depth still fails, implement MKV playback mode
-4. Consider native Windows build as alternative
+1. ~~Verify Azure Kinect works on Windows~~ (works)
+2. ~~If Windows works, try again in WSL after fresh reboot~~ (WSL depth still fails)
+3. ~~If WSL depth still fails, implement MKV playback mode~~ (or just use Windows)
+4. **Build natively on Windows** ← Current approach
