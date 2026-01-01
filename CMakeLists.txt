@@ -174,6 +174,7 @@ endif()
 ##################### InfiniTAM ############################
 INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseGLUT.cmake)
 INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseOpenGL.cmake)
+INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseAzureKinect.cmake)
 add_subdirectory(InfiniTAM)
 
 
@@ -277,6 +278,7 @@ target_link_libraries(slam_trainer PUBLIC
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
         glut
+        ${K4A_LIBRARIES}
 )
 target_include_directories(slam_trainer PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -305,8 +307,38 @@ target_link_libraries(remote_viewer PUBLIC
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
         glut
+        ${K4A_LIBRARIES}
 )
 target_include_directories(remote_viewer PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/slam
+    ${PROJECT_SOURCE_DIR}/gsplat
+    ${PROJECT_SOURCE_DIR}/InfiniTAM
+    ${tinyply_SOURCE_DIR}/source
+)
+
+#####################   online SLAM with Azure Kinect
+add_executable(online_slam online_slam.cpp ${OURS_SRC_FILES} ${SLAM_SRC_FILES})
+target_link_libraries(online_slam PUBLIC
+        gsplat
+        Eigen3::Eigen
+        indicators::indicators
+        tinyply
+        tensorboard_logger
+        yaml-cpp::yaml-cpp
+        ${Protobuf_LIBRARIES}
+        InputSource
+        ITMLib
+        MiniSlamGraphLib
+        ORUtils
+        FernRelocLib
+        cuda
+        ${NVML_LIBRARY}
+        ${OPENGL_LIBRARY}
+        glut
+        ${K4A_LIBRARIES}
+)
+target_include_directories(online_slam PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/slam
     ${PROJECT_SOURCE_DIR}/gsplat
