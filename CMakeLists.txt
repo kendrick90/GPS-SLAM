@@ -4,7 +4,18 @@ project(opensplat)
 set(GPU_RUNTIME "CUDA" )
 set(OPENSPLAT_MAX_CUDA_COMPATIBILITY OFF CACHE BOOL "Build for maximum CUDA device compatibility")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-set(CMAKE_PREFIX_PATH ${PROJECT_SOURCE_DIR}/ThirdLibs/libtorch ${PROJECT_SOURCE_DIR}/ThirdLibs/install)
+
+# Support both ThirdLibs (legacy) and conda-installed packages
+if(EXISTS ${PROJECT_SOURCE_DIR}/ThirdLibs/libtorch)
+    list(APPEND CMAKE_PREFIX_PATH ${PROJECT_SOURCE_DIR}/ThirdLibs/libtorch)
+endif()
+if(EXISTS ${PROJECT_SOURCE_DIR}/ThirdLibs/install)
+    list(APPEND CMAKE_PREFIX_PATH ${PROJECT_SOURCE_DIR}/ThirdLibs/install)
+endif()
+# Conda environment paths (set by conda activate)
+if(DEFINED ENV{CONDA_PREFIX})
+    list(APPEND CMAKE_PREFIX_PATH $ENV{CONDA_PREFIX})
+endif()
 
 # Read version
 file(READ "VERSION" APP_VERSION)
@@ -56,6 +67,41 @@ FetchContent_Declare(glm
 )
 FetchContent_MakeAvailable(glm)
 
+# indicators - progress bars (try find_package first, then FetchContent)
+find_package(indicators QUIET)
+if(NOT indicators_FOUND)
+    message(STATUS "indicators not found, fetching from GitHub...")
+    FetchContent_Declare(indicators
+        GIT_REPOSITORY https://github.com/p-ranav/indicators.git
+        GIT_TAG v2.3
+    )
+    set(INDICATORS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(indicators)
+endif()
+
+# tinyply - PLY file parser (try find_package first, then FetchContent)
+find_package(tinyply QUIET)
+if(NOT tinyply_FOUND)
+    message(STATUS "tinyply not found, fetching from GitHub...")
+    FetchContent_Declare(tinyply
+        GIT_REPOSITORY https://github.com/ddiakopoulos/tinyply.git
+        GIT_TAG 2.3.4
+    )
+    set(SHARED_LIB OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(tinyply)
+endif()
+
+# tensorboard_logger (try find_package first, then FetchContent)
+find_package(tensorboard_logger QUIET)
+if(NOT tensorboard_logger_FOUND)
+    message(STATUS "tensorboard_logger not found, fetching from GitHub...")
+    FetchContent_Declare(tensorboard_logger
+        GIT_REPOSITORY https://github.com/RustingSword/tensorboard_logger.git
+        GIT_TAG master
+    )
+    FetchContent_MakeAvailable(tensorboard_logger)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build, options are: Debug Release RelWithDebInfo MinSizeRel." FORCE)
 endif()
@@ -77,7 +123,8 @@ else()
     endif()
     if(NOT OPENSPLAT_MAX_CUDA_COMPATIBILITY)
         if(NOT CMAKE_CUDA_ARCHITECTURES)
-            SET(CMAKE_CUDA_ARCHITECTURES 70;75;80)
+            # CUDA 12.4 supports compute 50-90
+            SET(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90)
         endif()
     else()
         # Build for maximum compatibility
@@ -136,34 +183,34 @@ find_package(OpenCV REQUIRED)
 set(OpenCV_LIBS opencv_core opencv_imgproc opencv_highgui opencv_calib3d)
 
 ##################### My LIBS ############################
-set(THIRDLIBS_DIR "${CMAKE_SOURCE_DIR}/ThirdLibs/install/lib")
-link_directories(${THIRDLIBS_DIR})
+# Legacy ThirdLibs support
+if(EXISTS "${CMAKE_SOURCE_DIR}/ThirdLibs/install/lib")
+    set(THIRDLIBS_DIR "${CMAKE_SOURCE_DIR}/ThirdLibs/install/lib")
+    link_directories(${THIRDLIBS_DIR})
+endif()
 
 # yaml-cpp
-set(YAML_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/ThirdLibs/install/include/yaml-cpp")
+find_package(yaml-cpp QUIET)
+if(yaml-cpp_FOUND)
+    message(STATUS "Found yaml-cpp via find_package")
+else()
+    # Legacy: check ThirdLibs
+    if(EXISTS "${CMAKE_SOURCE_DIR}/ThirdLibs/install/include/yaml-cpp")
+        set(YAML_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/ThirdLibs/install/include/yaml-cpp")
+        message(STATUS "Using yaml-cpp from ThirdLibs")
+    endif()
+endif()
 
-# tensorboard_logger
+# Protobuf
 find_package(Protobuf REQUIRED)
-set(TENSORBOARD_LOGGER_DIR "${CMAKE_SOURCE_DIR}/ThirdLibs/install")
-find_package(tensorboard_logger REQUIRED REQUIRED HINTS ${TENSORBOARD_LOGGER_DIR})
-set(Protobuf_LIBRARIES "/usr/lib/x86_64-linux-gnu/libprotobuf.so")
 message(STATUS "Protobuf_VERSION: ${Protobuf_VERSION}")
 message(STATUS "Protobuf_INCLUDE_DIRS: ${Protobuf_INCLUDE_DIRS}")
 message(STATUS "Protobuf_LIBRARIES: ${Protobuf_LIBRARIES}")
-message(STATUS "Protobuf_PROTOC_EXECUTABLE: ${Protobuf_PROTOC_EXECUTABLE}")
 
 # eigen
 find_package(Eigen3 REQUIRED NO_MODULE)
 
-# indicators
-find_package(indicators REQUIRED)
-
-# tinyply
-find_package(tinyply REQUIRED)
-message(STATUS "tinyply_FOUND: ${tinyply_FOUND}")
-message(STATUS "tinyply_INCLUDE_DIRS: ${tinyply_INCLUDE_DIR}")
-message(STATUS "tinyply_LIBRARIES: ${tinyply_LIBRARY_DIR}")
-
+# Pangolin
 find_package(Pangolin 0.8 REQUIRED)
 
 find_library(NVML_LIBRARY nvidia-ml PATHS /usr/lib/x86_64-linux-gnu)
@@ -219,13 +266,13 @@ target_link_libraries(slam_trainer PUBLIC
         indicators::indicators
         tinyply
         tensorboard_logger
-        libyaml-cpp.a
+        yaml-cpp::yaml-cpp
         ${Protobuf_LIBRARIES}
-        InputSource 
-        ITMLib 
-        MiniSlamGraphLib 
-        ORUtils 
-        FernRelocLib 
+        InputSource
+        ITMLib
+        MiniSlamGraphLib
+        ORUtils
+        FernRelocLib
         cuda
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
@@ -236,6 +283,7 @@ target_include_directories(slam_trainer PRIVATE
     ${PROJECT_SOURCE_DIR}/slam
     ${PROJECT_SOURCE_DIR}/gsplat
     ${PROJECT_SOURCE_DIR}/InfiniTAM
+    ${tinyply_SOURCE_DIR}/source
 )
 
 #####################   ours implementation of remote viewer
@@ -246,13 +294,13 @@ target_link_libraries(remote_viewer PUBLIC
         indicators::indicators
         tinyply
         tensorboard_logger
-        libyaml-cpp.a
+        yaml-cpp::yaml-cpp
         ${Protobuf_LIBRARIES}
-        InputSource 
-        ITMLib 
-        MiniSlamGraphLib 
-        ORUtils 
-        FernRelocLib 
+        InputSource
+        ITMLib
+        MiniSlamGraphLib
+        ORUtils
+        FernRelocLib
         cuda
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
@@ -263,6 +311,7 @@ target_include_directories(remote_viewer PRIVATE
     ${PROJECT_SOURCE_DIR}/slam
     ${PROJECT_SOURCE_DIR}/gsplat
     ${PROJECT_SOURCE_DIR}/InfiniTAM
+    ${tinyply_SOURCE_DIR}/source
 )
 
 # The following code block is suggested to be used on Windows.
