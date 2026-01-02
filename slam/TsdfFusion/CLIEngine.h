@@ -88,6 +88,10 @@ namespace InfiniTAM
             }
 
             int GetCurrentFrameNo() const { return currentFrameNo; }
+
+            // Access to current frame images for visualization
+            ITMUChar4Image* GetCurrentRGBImage() const { return inputRGBImage; }
+            ITMShortImage* GetCurrentDepthImage() const { return inputRawDepthImage; }
         };
     }
 }

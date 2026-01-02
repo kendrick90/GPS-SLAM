@@ -19,12 +19,15 @@
  *   --no-align             Don't align depth to color
  *   --max-frames <N>       Stop after N frames (0 = unlimited)
  *   --output <dir>         Output directory for results
+ *   --no-display           Disable live visualization windows
  */
 
 #include <iostream>
 #include <csignal>
 #include <atomic>
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -38,6 +41,8 @@
 #include "InputSource/ImageSourceEngine.h"
 #include "ITMLib/Core/ITMBasicEngine.h"
 #include "ITMLib/Utils/ITMLibSettings.h"
+#include "ITMLib/Objects/Tracking/ITMTrackingState.h"
+#include "ITMLib/Objects/Misc/ITMIMUMeasurement.h"
 
 #include "TsdfFusion/CLIEngine.h"
 #include "InfiniTAM_tools.h"
@@ -72,12 +77,14 @@ void printUsage(const char* progName)
 {
     std::cout << "Usage: " << progName << " [config.yaml] [options]\n\n"
               << "Options:\n"
-              << "  --depth-mode <0-3>   Depth mode (default: 0=NFOV_UNBINNED)\n"
-              << "  --color-res <0-5>    Color resolution (default: 0=720P)\n"
+              << "  --depth-mode <0-3>   Depth mode (default: 2=WFOV_UNBINNED)\n"
+              << "  --color-res <0-5>    Color resolution (default: 1=1080P)\n"
               << "  --fps <5|15|30>      Frame rate (default: 30)\n"
               << "  --no-align           Don't align depth to color\n"
+              << "  --no-imu             Disable IMU tracking\n"
               << "  --max-frames <N>     Stop after N frames (0 = unlimited)\n"
               << "  --output <dir>       Output directory\n"
+              << "  --no-display         Disable live visualization\n"
               << "  --help               Show this help\n";
 }
 
@@ -94,11 +101,13 @@ int main(int argc, char *argv[])
     // Default parameters
     std::string configFile = "";
     std::string outputDir = "output_online";
-    int depthMode = 0;      // NFOV_UNBINNED (640x576)
-    int colorRes = 0;       // 720P (1280x720)
+    int depthMode = 2;      // WFOV_UNBINNED (1024x1024)
+    int colorRes = 1;       // 1080P (1920x1080)
     int fps = 30;
     bool alignDepth = true;
+    bool enableIMU = true;  // Use IMU if available
     int maxFrames = 0;      // 0 = unlimited
+    bool showDisplay = true; // Show live visualization
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++)
@@ -125,6 +134,14 @@ int main(int argc, char *argv[])
         {
             alignDepth = false;
         }
+        else if (arg == "--no-imu")
+        {
+            enableIMU = false;
+        }
+        else if (arg == "--no-display")
+        {
+            showDisplay = false;
+        }
         else if (arg == "--max-frames" && i + 1 < argc)
         {
             maxFrames = std::stoi(argv[++i]);
@@ -139,6 +156,13 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Auto-adjust FPS for depth modes that don't support 30 FPS
+    // WFOV_UNBINNED (mode 2) only supports 15 FPS max
+    if (depthMode == 2 && fps > 15) {
+        std::cout << "Note: WFOV_UNBINNED only supports 15 FPS, adjusting...\n";
+        fps = 15;
+    }
+
     std::cout << "=== GPS-SLAM Online Mode ===\n";
     std::cout << "Depth mode: " << depthMode << "\n";
     std::cout << "Color resolution: " << colorRes << "\n";
@@ -146,6 +170,7 @@ int main(int argc, char *argv[])
     std::cout << "Align depth to color: " << (alignDepth ? "yes" : "no") << "\n";
     std::cout << "Max frames: " << (maxFrames == 0 ? "unlimited" : std::to_string(maxFrames)) << "\n";
     std::cout << "Output directory: " << outputDir << "\n";
+    std::cout << "Live display: " << (showDisplay ? "enabled" : "disabled") << "\n";
 
     // Create output directory
     std::filesystem::create_directories(outputDir);
@@ -180,6 +205,13 @@ int main(int argc, char *argv[])
               << " cx=" << calib.intrinsics_d.projectionParamsSimple.px
               << " cy=" << calib.intrinsics_d.projectionParamsSimple.py << "\n";
 
+    // Check IMU availability
+    bool useIMU = enableIMU && kinect->hasIMU();
+    std::cout << "  IMU: " << (kinect->hasIMU() ? "available" : "not available");
+    if (kinect->hasIMU() && !enableIMU)
+        std::cout << " (disabled via --no-imu)";
+    std::cout << "\n";
+
     // Load config if provided, otherwise use defaults
     YAML::Node config;
     if (!configFile.empty())
@@ -211,6 +243,27 @@ int main(int argc, char *argv[])
     settings->useBilateralFilter = true;
     settings->useApproximateRaycast = false;
 
+    // Configure tracker based on IMU availability
+    if (useIMU)
+    {
+        // Use extended IMU tracker for better tracking with IMU data
+        // This fuses ICP depth tracking with IMU orientation prior
+        settings->trackerConfig = "type=extendedimu,levels=rrbb,useDepth=1,minstep=1e-4,"
+                                  "outlierSpaceC=0.1,outlierSpaceF=0.004,"
+                                  "numiterC=20,numiterF=50,tukeyCutOff=8,"
+                                  "framesToSkip=20,framesToWeight=50,failureDec=20.0";
+        std::cout << "Using Extended IMU tracker (IMU + Depth)\n";
+    }
+    else
+    {
+        // Standard extended depth tracker without IMU
+        settings->trackerConfig = "type=extended,levels=rrbb,useDepth=1,minstep=1e-4,"
+                                  "outlierSpaceC=0.1,outlierSpaceF=0.004,"
+                                  "numiterC=20,numiterF=50,tukeyCutOff=8,"
+                                  "framesToSkip=20,framesToWeight=50,failureDec=20.0";
+        std::cout << "Using Extended Depth tracker (no IMU)\n";
+    }
+
     // Create main TSDF engine
     ITMMainEngine *mainEngine = new ITMBasicEngine<ITMVoxel, ITMVoxelIndex>(
         settings, calib, rgbSize, depthSize
@@ -226,10 +279,54 @@ int main(int argc, char *argv[])
     // gsModel.loadConfig(config["MODEL"]);
 
     std::cout << "\n=== Starting Online SLAM ===\n";
-    std::cout << "Press Ctrl+C to stop.\n\n";
+    std::cout << "Controls:\n";
+    std::cout << "  WASD         - Move free camera\n";
+    std::cout << "  E/X          - Move up/down\n";
+    std::cout << "  IJKL/Arrows  - Look around\n";
+    std::cout << "  'r'          - Reset tracking (if lost)\n";
+    std::cout << "  'c'          - Clear volume and restart\n";
+    std::cout << "  'q'/ESC      - Quit and save mesh\n\n";
+
+    // Create display windows if enabled
+    ITMUChar4Image *raycastImage = nullptr;
+    ITMUChar4Image *freeViewImage = nullptr;
+    ORUtils::SE3Pose *freeViewPose = nullptr;
+
+    // Free camera state (FPS-style)
+    float freeCamX = 0.0f, freeCamY = 1.0f, freeCamZ = 2.0f;  // Position
+    float freeCamYaw = 0.0f;    // Left/right rotation (radians)
+    float freeCamPitch = -0.3f; // Up/down rotation (radians)
+    float moveSpeed = 0.1f;
+    float rotSpeed = 0.05f;
+
+    // Mouse tracking
+    int lastMouseX = -1, lastMouseY = -1;
+    bool mouseControlEnabled = false;
+
+    if (showDisplay)
+    {
+        cv::namedWindow("RGB", cv::WINDOW_NORMAL);
+        cv::namedWindow("Depth", cv::WINDOW_NORMAL);
+        cv::namedWindow("3D Reconstruction", cv::WINDOW_NORMAL);
+        cv::namedWindow("Free View (arrows to orbit)", cv::WINDOW_NORMAL);
+        cv::resizeWindow("RGB", 640, 360);
+        cv::resizeWindow("Depth", 640, 360);
+        cv::resizeWindow("3D Reconstruction", 640, 360);
+        cv::resizeWindow("Free View (arrows to orbit)", 640, 360);
+
+        // Allocate images for visualization
+        raycastImage = new ITMUChar4Image(depthSize, true, false);
+        freeViewImage = new ITMUChar4Image(depthSize, true, false);
+        freeViewPose = new ORUtils::SE3Pose();
+    }
 
     int frameCount = 0;
     auto startTime = std::chrono::high_resolution_clock::now();
+
+    // Allocate input images for direct processing (with IMU support)
+    ITMUChar4Image *inputRGBImage = new ITMUChar4Image(rgbSize, true, true);
+    ITMShortImage *inputRawDepthImage = new ITMShortImage(depthSize, true, true);
+    ITMIMUMeasurement *imuMeasurement = useIMU ? new ITMIMUMeasurement() : nullptr;
 
     // Main SLAM loop
     while (!g_shouldStop && kinect->hasMoreImages())
@@ -240,17 +337,41 @@ int main(int argc, char *argv[])
             break;
         }
 
-        // Process one frame (TSDF fusion + tracking)
-        if (!cliEngine->ProcessLiveFrame())
+        // Get images from sensor
+        kinect->getImages(inputRGBImage, inputRawDepthImage);
+
+        // Check if we got valid images (frame drop protection)
+        if (!kinect->hasImagesNow())
         {
-            std::cerr << "Failed to process frame.\n";
-            break;
+            // Frame dropped, skip processing but don't fail
+            continue;
         }
+
+        // Update IMU orientation (integrate gyroscope)
+        if (useIMU)
+        {
+            kinect->updateIMU();
+            Matrix3f R;
+            if (kinect->getIMUOrientation(R))
+            {
+                imuMeasurement->R = R;
+            }
+        }
+
+        // Process frame with IMU (TSDF fusion + tracking)
+        mainEngine->ProcessFrame(inputRGBImage, inputRawDepthImage, imuMeasurement);
 
         frameCount++;
 
-        // Get current pose
-        ORUtils::SE3Pose *pose = mainEngine->GetTrackingState()->pose_d;
+        // Get current pose and tracking status
+        ITMTrackingState *trackingState = mainEngine->GetTrackingState();
+        ORUtils::SE3Pose *pose = trackingState->pose_d;
+        ITMTrackingState::TrackingResult trackingResult = trackingState->trackerResult;
+
+        // Get tracking status string
+        const char* trackingStatus = "GOOD";
+        if (trackingResult == ITMTrackingState::TRACKING_POOR) trackingStatus = "POOR";
+        else if (trackingResult == ITMTrackingState::TRACKING_FAILED) trackingStatus = "LOST";
 
         // Print progress every 30 frames
         if (frameCount % 30 == 0)
@@ -262,6 +383,7 @@ int main(int argc, char *argv[])
             Matrix4f M = pose->GetM();
             std::cout << "Frame " << frameCount
                       << " | FPS: " << std::fixed << std::setprecision(1) << avgFps
+                      << " | Tracking: " << trackingStatus
                       << " | Pose: [" << M.m30 << ", " << M.m31 << ", " << M.m32 << "]\n";
         }
 
@@ -270,6 +392,157 @@ int main(int argc, char *argv[])
         // {
         //     pipeline.localOptimization(gsModel, ...);
         // }
+
+        // Live visualization
+        if (showDisplay)
+        {
+            if (inputRGBImage && inputRawDepthImage)
+            {
+                // Convert RGB (RGBA -> BGR for OpenCV)
+                cv::Mat rgbMat(rgbSize.y, rgbSize.x, CV_8UC4, inputRGBImage->GetData(MEMORYDEVICE_CPU));
+                cv::Mat bgrMat;
+                cv::cvtColor(rgbMat, bgrMat, cv::COLOR_RGBA2BGR);
+
+                // Convert depth to colorized visualization
+                cv::Mat depthMat(depthSize.y, depthSize.x, CV_16UC1, inputRawDepthImage->GetData(MEMORYDEVICE_CPU));
+                cv::Mat depthVis;
+                depthMat.convertTo(depthVis, CV_8UC1, 255.0 / 5000.0);
+                cv::applyColorMap(depthVis, depthVis, cv::COLORMAP_JET);
+
+                // Get 3D reconstruction raycast (TSDF volume rendered from current viewpoint)
+                mainEngine->GetImage(raycastImage, ITMMainEngine::InfiniTAM_IMAGE_COLOUR_FROM_VOLUME);
+                cv::Mat raycastMat(depthSize.y, depthSize.x, CV_8UC4, raycastImage->GetData(MEMORYDEVICE_CPU));
+                cv::Mat raycastBgr;
+                cv::cvtColor(raycastMat, raycastBgr, cv::COLOR_RGBA2BGR);
+
+                // Render FREE VIEW - FPS-style camera
+                // Calculate forward/right vectors from yaw/pitch
+                float cosYaw = cos(freeCamYaw), sinYaw = sin(freeCamYaw);
+                float cosPitch = cos(freeCamPitch), sinPitch = sin(freeCamPitch);
+
+                // Forward vector (where camera looks)
+                Vector3f forward(-sinYaw * cosPitch, -sinPitch, -cosYaw * cosPitch);
+                Vector3f right(cosYaw, 0.0f, -sinYaw);
+                Vector3f up = ORUtils::cross(right, forward);
+
+                // Build rotation matrix (camera orientation)
+                Matrix3f R;
+                R.m00 = right.x;   R.m10 = right.y;   R.m20 = right.z;
+                R.m01 = up.x;      R.m11 = up.y;      R.m21 = up.z;
+                R.m02 = -forward.x; R.m12 = -forward.y; R.m22 = -forward.z;
+
+                Vector3f camPos(freeCamX, freeCamY, freeCamZ);
+                freeViewPose->SetR(R);
+                freeViewPose->SetT(camPos);
+
+                mainEngine->GetImage(freeViewImage, ITMMainEngine::InfiniTAM_IMAGE_FREECAMERA_COLOUR_FROM_VOLUME,
+                                    freeViewPose, &calib.intrinsics_d);
+                cv::Mat freeViewMat(depthSize.y, depthSize.x, CV_8UC4, freeViewImage->GetData(MEMORYDEVICE_CPU));
+                cv::Mat freeViewBgr;
+                cv::cvtColor(freeViewMat, freeViewBgr, cv::COLOR_RGBA2BGR);
+
+                // Show controls help
+                cv::putText(freeViewBgr, "WASD=move QE=up/down Mouse=look", cv::Point(10, 30),
+                           cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+                cv::putText(freeViewBgr, cv::format("Pos: [%.1f, %.1f, %.1f]", freeCamX, freeCamY, freeCamZ),
+                           cv::Point(10, 55), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+
+                // Add frame info overlay with tracking status color
+                cv::Scalar statusColor;
+                if (trackingResult == ITMTrackingState::TRACKING_GOOD)
+                    statusColor = cv::Scalar(0, 255, 0);  // Green
+                else if (trackingResult == ITMTrackingState::TRACKING_POOR)
+                    statusColor = cv::Scalar(0, 255, 255);  // Yellow
+                else
+                    statusColor = cv::Scalar(0, 0, 255);  // Red
+
+                Matrix4f M = pose->GetM();
+                std::string info = cv::format("Frame: %d | %s", frameCount, trackingStatus);
+                std::string poseInfo = cv::format("Pose: [%.2f, %.2f, %.2f]", M.m30, M.m31, M.m32);
+                cv::putText(bgrMat, info, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.6, statusColor, 2);
+                cv::putText(bgrMat, poseInfo, cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.6, statusColor, 2);
+
+                std::string reconInfo = cv::format("3D Reconstruction | %s", trackingStatus);
+                cv::putText(raycastBgr, reconInfo, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.6, statusColor, 2);
+
+                cv::imshow("RGB", bgrMat);
+                cv::imshow("Depth", depthVis);
+                cv::imshow("3D Reconstruction", raycastBgr);
+                cv::imshow("Free View (arrows to orbit)", freeViewBgr);
+            }
+
+            // Handle keyboard input
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 'Q' || key == 27)  // 27 = ESC
+            {
+                std::cout << "\nQuit requested via keyboard.\n";
+                g_shouldStop = true;
+            }
+            else if (key == 'r' || key == 'R')
+            {
+                // Reset tracking pose to identity
+                std::cout << "\n*** Resetting tracking pose ***\n";
+                trackingState->Reset();
+                std::cout << "Tracking reset. Move camera slowly to re-acquire.\n";
+            }
+            else if (key == 'c' || key == 'C')
+            {
+                // Full reset - clear TSDF volume and tracking
+                std::cout << "\n*** Clearing volume and resetting ***\n";
+                auto* basicEngine = dynamic_cast<ITMBasicEngine<ITMVoxel, ITMVoxelIndex>*>(mainEngine);
+                if (basicEngine) {
+                    basicEngine->resetAll();
+                    std::cout << "Volume cleared. Starting fresh scan.\n";
+                }
+            }
+            // WASD + QE for free camera movement
+            float cosYaw = cos(freeCamYaw), sinYaw = sin(freeCamYaw);
+            if (key == 'w' || key == 'W')  // Forward
+            {
+                freeCamX -= sinYaw * moveSpeed;
+                freeCamZ -= cosYaw * moveSpeed;
+            }
+            else if (key == 's' || key == 'S')  // Backward
+            {
+                freeCamX += sinYaw * moveSpeed;
+                freeCamZ += cosYaw * moveSpeed;
+            }
+            else if (key == 'a' || key == 'A')  // Strafe left
+            {
+                freeCamX -= cosYaw * moveSpeed;
+                freeCamZ += sinYaw * moveSpeed;
+            }
+            else if (key == 'd' || key == 'D')  // Strafe right
+            {
+                freeCamX += cosYaw * moveSpeed;
+                freeCamZ -= sinYaw * moveSpeed;
+            }
+            else if (key == 'e' || key == 'E')  // Up
+            {
+                freeCamY += moveSpeed;
+            }
+            else if (key == 'x' || key == 'X')  // Down
+            {
+                freeCamY -= moveSpeed;
+            }
+            // Arrow keys for rotation
+            else if (key == 2424832 || key == 81 || key == 'j' || key == 'J')  // Left - turn left
+            {
+                freeCamYaw -= rotSpeed;
+            }
+            else if (key == 2555904 || key == 83 || key == 'l' || key == 'L')  // Right - turn right
+            {
+                freeCamYaw += rotSpeed;
+            }
+            else if (key == 2490368 || key == 82 || key == 'i' || key == 'I')  // Up - look up
+            {
+                freeCamPitch = std::max(-1.5f, freeCamPitch - rotSpeed);
+            }
+            else if (key == 2621440 || key == 84 || key == 'k' || key == 'K')  // Down - look down
+            {
+                freeCamPitch = std::min(1.5f, freeCamPitch + rotSpeed);
+            }
+        }
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();
@@ -290,6 +563,16 @@ int main(int argc, char *argv[])
 
     // Cleanup
     std::cout << "\nShutting down...\n";
+    if (showDisplay)
+    {
+        cv::destroyAllWindows();
+        if (raycastImage) delete raycastImage;
+        if (freeViewImage) delete freeViewImage;
+        if (freeViewPose) delete freeViewPose;
+    }
+    if (inputRGBImage) delete inputRGBImage;
+    if (inputRawDepthImage) delete inputRawDepthImage;
+    if (imuMeasurement) delete imuMeasurement;
     cliEngine->Shutdown();
     delete mainEngine;
     delete settings;

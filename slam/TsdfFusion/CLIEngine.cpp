@@ -96,6 +96,13 @@ bool CLIEngine::ProcessLiveFrame()
     // Get images from the sensor
     imageSource->getImages(inputRGBImage, inputRawDepthImage);
 
+    // Check if we got valid images (frame drop protection)
+    if (!imageSource->hasImagesNow())
+    {
+        // Frame dropped, skip processing but don't fail
+        return true;
+    }
+
     sdkResetTimer(&timer_instant);
     sdkStartTimer(&timer_instant);
     sdkStartTimer(&timer_average);

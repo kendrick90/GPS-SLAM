@@ -79,6 +79,7 @@ AzureKinectEngine::AzureKinectEngine(const char *calibFilename,
       alignDepthToColor(alignDepthToColor)
 {
     dataAvailable = false;
+    imuAvailable = false;
 
     // Check for connected devices
     uint32_t device_count = k4a_device_get_installed_count();
@@ -129,6 +130,15 @@ AzureKinectEngine::AzureKinectEngine(const char *calibFilename,
         return;
     }
 
+    // Start IMU
+    if (k4a_device_start_imu(device) != K4A_RESULT_SUCCEEDED) {
+        printf("Warning: Failed to start IMU (continuing without IMU)\n");
+        imuAvailable = false;
+    } else {
+        printf("IMU started successfully\n");
+        imuAvailable = true;
+    }
+
     // Get calibration for depth-color alignment
     if (k4a_device_get_calibration(device, config.depth_mode, config.color_resolution, &calibration)
         != K4A_RESULT_SUCCEEDED) {
@@ -152,23 +162,24 @@ AzureKinectEngine::AzureKinectEngine(const char *calibFilename,
     k4a_calibration_intrinsic_parameters_t *color_intrinsics =
         &calibration.color_camera_calibration.intrinsics.parameters;
 
+    // Use SetFrom() to properly initialize all intrinsic fields including imgSize and all vector
     if (alignDepthToColor) {
-        // Use color intrinsics for both when aligned
-        this->calib.intrinsics_d.projectionParamsSimple.fx = color_intrinsics->param.fx;
-        this->calib.intrinsics_d.projectionParamsSimple.fy = color_intrinsics->param.fy;
-        this->calib.intrinsics_d.projectionParamsSimple.px = color_intrinsics->param.cx;
-        this->calib.intrinsics_d.projectionParamsSimple.py = color_intrinsics->param.cy;
+        // Use color intrinsics for depth when aligned (depth is transformed to color space)
+        this->calib.intrinsics_d.SetFrom(
+            imageSize_d.x, imageSize_d.y,
+            color_intrinsics->param.fx, color_intrinsics->param.fy,
+            color_intrinsics->param.cx, color_intrinsics->param.cy);
     } else {
-        this->calib.intrinsics_d.projectionParamsSimple.fx = depth_intrinsics->param.fx;
-        this->calib.intrinsics_d.projectionParamsSimple.fy = depth_intrinsics->param.fy;
-        this->calib.intrinsics_d.projectionParamsSimple.px = depth_intrinsics->param.cx;
-        this->calib.intrinsics_d.projectionParamsSimple.py = depth_intrinsics->param.cy;
+        this->calib.intrinsics_d.SetFrom(
+            imageSize_d.x, imageSize_d.y,
+            depth_intrinsics->param.fx, depth_intrinsics->param.fy,
+            depth_intrinsics->param.cx, depth_intrinsics->param.cy);
     }
 
-    this->calib.intrinsics_rgb.projectionParamsSimple.fx = color_intrinsics->param.fx;
-    this->calib.intrinsics_rgb.projectionParamsSimple.fy = color_intrinsics->param.fy;
-    this->calib.intrinsics_rgb.projectionParamsSimple.px = color_intrinsics->param.cx;
-    this->calib.intrinsics_rgb.projectionParamsSimple.py = color_intrinsics->param.cy;
+    this->calib.intrinsics_rgb.SetFrom(
+        imageSize_rgb.x, imageSize_rgb.y,
+        color_intrinsics->param.fx, color_intrinsics->param.fy,
+        color_intrinsics->param.cx, color_intrinsics->param.cy);
 
     // Set disparity calibration (depth scale)
     // Azure Kinect depth is in millimeters, scale to meters
@@ -193,6 +204,7 @@ AzureKinectEngine::~AzureKinectEngine()
         k4a_transformation_destroy(transformation);
     }
     if (device) {
+        k4a_device_stop_imu(device);
         k4a_device_stop_cameras(device);
         k4a_device_close(device);
     }
@@ -289,6 +301,11 @@ bool AzureKinectEngine::hasMoreImages(void) const
     return device != nullptr;
 }
 
+bool AzureKinectEngine::hasImagesNow(void) const
+{
+    return device != nullptr && dataAvailable;
+}
+
 Vector2i AzureKinectEngine::getDepthImageSize(void) const
 {
     return device ? imageSize_d : Vector2i(0, 0);
@@ -301,7 +318,7 @@ Vector2i AzureKinectEngine::getRGBImageSize(void) const
 
 bool AzureKinectEngine::hasIMU(void) const
 {
-    return device != nullptr;
+    return imuAvailable;
 }
 
 bool AzureKinectEngine::getIMUSample(float *acc, float *gyro, uint64_t *timestamp_usec)
@@ -332,6 +349,68 @@ bool AzureKinectEngine::getIMUSample(float *acc, float *gyro, uint64_t *timestam
     return true;
 }
 
+void AzureKinectEngine::updateIMU()
+{
+    if (!device) return;
+
+    // Drain all available IMU samples and integrate
+    k4a_imu_sample_t imu_sample;
+    while (k4a_device_get_imu_sample(device, &imu_sample, 0) == K4A_WAIT_RESULT_SUCCEEDED) {
+        uint64_t timestamp = imu_sample.gyro_timestamp_usec;
+
+        if (lastImuTimestamp > 0) {
+            float dt = (timestamp - lastImuTimestamp) * 1e-6f;  // Convert to seconds
+
+            // Get gyro data (rad/s)
+            float gx = imu_sample.gyro_sample.xyz.x;
+            float gy = imu_sample.gyro_sample.xyz.y;
+            float gz = imu_sample.gyro_sample.xyz.z;
+
+            // Simple quaternion integration (first-order)
+            float qw = imuQuat[0], qx = imuQuat[1], qy = imuQuat[2], qz = imuQuat[3];
+
+            float halfDt = 0.5f * dt;
+            imuQuat[0] += halfDt * (-qx*gx - qy*gy - qz*gz);
+            imuQuat[1] += halfDt * ( qw*gx + qy*gz - qz*gy);
+            imuQuat[2] += halfDt * ( qw*gy - qx*gz + qz*gx);
+            imuQuat[3] += halfDt * ( qw*gz + qx*gy - qy*gx);
+
+            // Normalize quaternion
+            float norm = sqrt(imuQuat[0]*imuQuat[0] + imuQuat[1]*imuQuat[1] +
+                             imuQuat[2]*imuQuat[2] + imuQuat[3]*imuQuat[3]);
+            if (norm > 0.0f) {
+                imuQuat[0] /= norm;
+                imuQuat[1] /= norm;
+                imuQuat[2] /= norm;
+                imuQuat[3] /= norm;
+            }
+        }
+        lastImuTimestamp = timestamp;
+    }
+}
+
+bool AzureKinectEngine::getIMUOrientation(Matrix3f &R)
+{
+    if (!device) return false;
+
+    // Convert quaternion to rotation matrix
+    float qw = imuQuat[0], qx = imuQuat[1], qy = imuQuat[2], qz = imuQuat[3];
+
+    R.m00 = 1.0f - 2.0f*(qy*qy + qz*qz);
+    R.m01 = 2.0f*(qx*qy - qz*qw);
+    R.m02 = 2.0f*(qx*qz + qy*qw);
+
+    R.m10 = 2.0f*(qx*qy + qz*qw);
+    R.m11 = 1.0f - 2.0f*(qx*qx + qz*qz);
+    R.m12 = 2.0f*(qy*qz - qx*qw);
+
+    R.m20 = 2.0f*(qx*qz - qy*qw);
+    R.m21 = 2.0f*(qy*qz + qx*qw);
+    R.m22 = 1.0f - 2.0f*(qx*qx + qy*qy);
+
+    return true;
+}
+
 #else
 
 // Stub implementation when compiled without Azure Kinect support
@@ -347,6 +426,7 @@ AzureKinectEngine::AzureKinectEngine(const char *calibFilename,
 {
     printf("Compiled without Azure Kinect SDK support\n");
     dataAvailable = false;
+    imuAvailable = false;
 }
 
 AzureKinectEngine::~AzureKinectEngine() {}
@@ -355,6 +435,8 @@ void AzureKinectEngine::getImages(ITMUChar4Image *rgbImage, ITMShortImage *rawDe
 
 bool AzureKinectEngine::hasMoreImages(void) const { return false; }
 
+bool AzureKinectEngine::hasImagesNow(void) const { return false; }
+
 Vector2i AzureKinectEngine::getDepthImageSize(void) const { return Vector2i(0, 0); }
 
 Vector2i AzureKinectEngine::getRGBImageSize(void) const { return Vector2i(0, 0); }
@@ -362,5 +444,9 @@ Vector2i AzureKinectEngine::getRGBImageSize(void) const { return Vector2i(0, 0);
 bool AzureKinectEngine::hasIMU(void) const { return false; }
 
 bool AzureKinectEngine::getIMUSample(float *acc, float *gyro, uint64_t *timestamp_usec) { return false; }
+
+void AzureKinectEngine::updateIMU() {}
+
+bool AzureKinectEngine::getIMUOrientation(Matrix3f &R) { R.setIdentity(); return false; }
 
 #endif

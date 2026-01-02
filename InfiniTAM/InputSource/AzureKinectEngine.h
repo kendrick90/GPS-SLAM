@@ -16,6 +16,7 @@ class AzureKinectEngine : public BaseImageSourceEngine
 {
 private:
     bool dataAvailable;
+    bool imuAvailable;
 
 #ifdef COMPILE_WITH_AzureKinect
     k4a_device_t device;
@@ -26,6 +27,10 @@ private:
 
     Vector2i imageSize_rgb, imageSize_d;
     bool alignDepthToColor;
+
+    // IMU orientation state (quaternion: w, x, y, z)
+    float imuQuat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    uint64_t lastImuTimestamp = 0;
 
 public:
     // depth_mode: 0=NFOV_UNBINNED, 1=NFOV_2X2BINNED, 2=WFOV_UNBINNED, 3=WFOV_2X2BINNED
@@ -38,6 +43,7 @@ public:
     ~AzureKinectEngine();
 
     bool hasMoreImages(void) const override;
+    bool hasImagesNow(void) const override;
     void getImages(ITMUChar4Image *rgb, ITMShortImage *rawDepth) override;
     Vector2i getDepthImageSize(void) const override;
     Vector2i getRGBImageSize(void) const override;
@@ -45,6 +51,12 @@ public:
     // IMU support
     bool hasIMU(void) const;
     bool getIMUSample(float *acc, float *gyro, uint64_t *timestamp_usec);
+
+    // Get IMU orientation as 3x3 rotation matrix (for InfiniTAM)
+    bool getIMUOrientation(Matrix3f &R);
+
+    // Update IMU orientation (call each frame to integrate gyro)
+    void updateIMU();
 };
 
 }
