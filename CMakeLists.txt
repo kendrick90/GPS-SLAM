@@ -241,16 +241,21 @@ else()
     endif()
 endif()
 
-# Protobuf - use the one from Torch/Caffe2, skip explicit find if already defined
-if(NOT TARGET protobuf::libprotobuf)
-    find_package(Protobuf REQUIRED)
-    message(STATUS "Protobuf_VERSION: ${Protobuf_VERSION}")
-    message(STATUS "Protobuf_INCLUDE_DIRS: ${Protobuf_INCLUDE_DIRS}")
-    message(STATUS "Protobuf_LIBRARIES: ${Protobuf_LIBRARIES}")
+# Protobuf - only needed for TensorBoard logging
+# vcpkg's protobuf can conflict with libtorch's bundled protobuf
+if(USE_TENSORBOARD)
+    if(NOT TARGET protobuf::libprotobuf)
+        find_package(Protobuf REQUIRED)
+        message(STATUS "Protobuf_VERSION: ${Protobuf_VERSION}")
+        message(STATUS "Protobuf_INCLUDE_DIRS: ${Protobuf_INCLUDE_DIRS}")
+        message(STATUS "Protobuf_LIBRARIES: ${Protobuf_LIBRARIES}")
+    else()
+        message(STATUS "Using protobuf from Torch/Caffe2")
+        get_target_property(Protobuf_LIBRARIES protobuf::libprotobuf LOCATION)
+    endif()
 else()
-    message(STATUS "Using protobuf from Torch/Caffe2")
-    # Get protobuf libraries from the target
-    get_target_property(Protobuf_LIBRARIES protobuf::libprotobuf LOCATION)
+    set(Protobuf_LIBRARIES "")
+    message(STATUS "Protobuf not needed (USE_TENSORBOARD=OFF)")
 endif()
 
 # eigen
