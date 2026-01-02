@@ -17,22 +17,14 @@ using namespace nb::literals;
 
 namespace sap {
 
-// Helper to convert cv::Mat to numpy array (zero-copy when possible)
-nb::ndarray<nb::numpy, uint8_t, nb::shape<nb::any, nb::any, 3>>
-mat_to_ndarray(const cv::Mat& mat) {
-    if (mat.empty()) {
-        return nb::ndarray<nb::numpy, uint8_t, nb::shape<nb::any, nb::any, 3>>();
-    }
-
-    size_t shape[3] = {(size_t)mat.rows, (size_t)mat.cols, 3};
-    return nb::ndarray<nb::numpy, uint8_t, nb::shape<nb::any, nb::any, 3>>(
-        mat.data, 3, shape
-    );
-}
-
 // Helper to convert numpy array to cv::Mat (zero-copy)
-cv::Mat ndarray_to_mat(nb::ndarray<uint8_t, nb::shape<nb::any, nb::any, 3>, nb::c_contig, nb::device::cpu> arr) {
-    return cv::Mat(arr.shape(0), arr.shape(1), CV_8UC3, arr.data());
+cv::Mat ndarray_to_mat(nb::ndarray<uint8_t, nb::c_contig, nb::device::cpu> arr) {
+    if (arr.ndim() < 2) return cv::Mat();
+    int rows = static_cast<int>(arr.shape(0));
+    int cols = static_cast<int>(arr.shape(1));
+    int channels = (arr.ndim() >= 3) ? static_cast<int>(arr.shape(2)) : 1;
+    int type = (channels == 3) ? CV_8UC3 : (channels == 1) ? CV_8UC1 : CV_8UC4;
+    return cv::Mat(rows, cols, type, reinterpret_cast<void*>(const_cast<uint8_t*>(arr.data())));
 }
 
 }  // namespace sap
@@ -67,14 +59,16 @@ NB_MODULE(_core, m) {
         .def_rw("frame_id", &FrameData::frame_id)
         .def_rw("intrinsics", &FrameData::intrinsics)
         .def("valid", &FrameData::valid)
-        .def_prop_ro("rgb", [](const FrameData& f) {
-            // Return as numpy array
-            if (f.rgb.empty()) return nb::ndarray<nb::numpy, uint8_t>();
-            size_t shape[3] = {(size_t)f.rgb.rows, (size_t)f.rgb.cols, 3};
-            return nb::ndarray<nb::numpy, uint8_t>(
-                f.rgb.data, 3, shape,
-                nb::handle()  // No owner, copy data
-            );
+        .def("get_rgb_copy", [](const FrameData& f) -> std::vector<uint8_t> {
+            // Return as flat vector (to be reshaped in Python)
+            if (f.rgb.empty()) return {};
+            std::vector<uint8_t> data(f.rgb.total() * f.rgb.elemSize());
+            std::memcpy(data.data(), f.rgb.data, data.size());
+            return data;
+        })
+        .def("rgb_shape", [](const FrameData& f) -> std::vector<size_t> {
+            if (f.rgb.empty()) return {};
+            return {static_cast<size_t>(f.rgb.rows), static_cast<size_t>(f.rgb.cols), 3};
         })
         .def_prop_ro("has_depth", [](const FrameData& f) { return f.depth.has_value(); });
 

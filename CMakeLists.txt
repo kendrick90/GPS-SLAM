@@ -206,7 +206,7 @@ add_subdirectory(legacy/InfiniTAM)
 # Find OpenCV BEFORE Torch to avoid protobuf target conflicts
 # (OpenCV from vcpkg uses vcpkg's protobuf, Torch ships its own)
 find_package(OpenCV REQUIRED)
-set(OpenCV_LIBS opencv_core opencv_imgproc opencv_highgui opencv_calib3d)
+set(OpenCV_LIBS opencv_core opencv_imgproc opencv_highgui opencv_calib3d opencv_video opencv_features2d)
 
 # Workaround: CUDA 12.x removed nvToolsExt as a separate library (now header-only NVTX3)
 # LibTorch's cmake expects CUDA::nvToolsExt, so create an empty interface target if missing

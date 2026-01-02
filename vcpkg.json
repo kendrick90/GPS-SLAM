@@ -14,9 +14,16 @@
     "spdlog",
     "nlohmann-json",
     {
-      "name": "librealsense2",
+      "name": "realsense2",
       "platform": "windows"
-    }
+    },
+    {
+      "name": "pangolin",
+      "features": ["png", "jpeg"]
+    },
+    "freeglut",
+    "yaml-cpp",
+    "boost-system"
   ],
   "features": {
     "azure-kinect": {

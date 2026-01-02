@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <opencv2/core.hpp>
 #include <optional>
 #include <memory>
