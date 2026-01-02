@@ -22,3 +22,5 @@ venv/
 *.zip
 *.deb
 /viewer
+nul
+/.claude
