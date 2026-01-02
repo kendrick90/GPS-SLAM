@@ -136,9 +136,11 @@ NB_MODULE(_core, m) {
         .def(nb::init<>());
 
     // ========== Utility Functions ==========
-    m.def("create_webcam", []() { return std::make_unique<WebcamCamera>(); },
+    m.def("create_webcam", []() { return new WebcamCamera(); },
+          nb::rv_policy::take_ownership,
           "Create a webcam camera instance");
 
-    m.def("create_tracker", [](const std::string& type) { return Tracker::create(type); },
+    m.def("create_tracker", [](const std::string& type) { return Tracker::create(type).release(); },
+          nb::rv_policy::take_ownership,
           "type"_a = "default", "Create a tracker instance");
 }
