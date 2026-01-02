@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "spatial-ai-playground",
+  "version": "0.1.0",
+  "description": "A modular platform for experimenting with spatial AI, SLAM, depth estimation, segmentation, and neural rendering",
+  "homepage": "https://github.com/Kendrick90/spatial-ai-playground",
+  "dependencies": [
+    "eigen3",
+    {
+      "name": "opencv4",
+      "features": ["dnn", "contrib"]
+    },
+    "fmt",
+    "spdlog",
+    "nlohmann-json",
+    {
+      "name": "librealsense2",
+      "platform": "windows"
+    }
+  ],
+  "features": {
+    "azure-kinect": {
+      "description": "Azure Kinect sensor support",
+      "dependencies": []
+    },
+    "cuda": {
+      "description": "CUDA acceleration",
+      "dependencies": [
+        {
+          "name": "opencv4",
+          "features": ["cuda"]
+        }
+      ]
+    },
+    "rerun": {
+      "description": "Rerun visualization support",
+      "dependencies": ["rerun-sdk"]
+    }
+  }
+}

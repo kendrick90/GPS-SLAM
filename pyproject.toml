@@ -1,0 +1,81 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "spatial-ai-playground"
+version = "0.1.0"
+description = "A modular platform for experimenting with spatial AI, SLAM, and neural rendering"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "Kendrick"},
+]
+keywords = ["slam", "computer-vision", "3d-reconstruction", "gaussian-splatting", "depth-estimation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "rerun-sdk>=0.18",
+    "torch>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+depth = [
+    "transformers>=4.30",
+    "timm>=0.9",
+]
+segmentation = [
+    "segment-anything",
+]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1",
+]
+all = [
+    "spatial-ai-playground[depth,segmentation,dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/Kendrick90/spatial-ai-playground"
+Documentation = "https://github.com/Kendrick90/spatial-ai-playground#readme"
+Repository = "https://github.com/Kendrick90/spatial-ai-playground"
+
+[project.scripts]
+sap = "spatial_ai_playground.cli:main"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "RelWithDebInfo"
+wheel.packages = ["python/spatial_ai_playground"]
+
+[tool.scikit-build.cmake.define]
+SAP_BUILD_PYTHON = "ON"
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]

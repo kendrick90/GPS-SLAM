@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.21)
-project(opensplat)
+project(spatial-ai-playground VERSION 0.1.0 LANGUAGES CXX)
+
+# ============================================================================
+# Spatial AI Playground Build Configuration
+# ============================================================================
+# Architecture: Python-driven with C++ core
+# - Layer 1: C++ SLAM/Vision core (this CMake)
+# - Layer 2: Nanobind bindings for Python
+# - Layer 3: Python application (see python/)
+# - Layer 4: Rerun visualization
+# ============================================================================
+
+option(SAP_BUILD_PYTHON "Build Python bindings via Nanobind" ON)
+option(SAP_BUILD_LEGACY "Build legacy GPS-SLAM executables" ON)
+option(SAP_BUILD_TESTS "Build tests" OFF)
 
 # Prevent Windows.h from defining min/max macros
 if(WIN32)
@@ -182,10 +196,10 @@ if (NOT WIN32 AND NOT APPLE)
 endif()
 
 ##################### InfiniTAM ############################
-INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseGLUT.cmake)
-INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseOpenGL.cmake)
-INCLUDE(${PROJECT_SOURCE_DIR}/InfiniTAM/cmake/UseAzureKinect.cmake)
-add_subdirectory(InfiniTAM)
+INCLUDE(${PROJECT_SOURCE_DIR}/legacy/InfiniTAM/cmake/UseGLUT.cmake)
+INCLUDE(${PROJECT_SOURCE_DIR}/legacy/InfiniTAM/cmake/UseOpenGL.cmake)
+INCLUDE(${PROJECT_SOURCE_DIR}/legacy/InfiniTAM/cmake/UseAzureKinect.cmake)
+add_subdirectory(legacy/InfiniTAM)
 
 
 ##################### LIBTORCH and OpenCV ############################
@@ -268,7 +282,7 @@ endif()
 ##############################################################
 #####################   gsplat rasterizer
 set(RASTERIZER_LIBS rasterizer)
-file(GLOB RASTERIZER_SRC_FILES ${PROJECT_SOURCE_DIR}/gsplat/rasterizer/*.cu ${PROJECT_SOURCE_DIR}/gsplat/rasterizer/*.cuh)
+file(GLOB RASTERIZER_SRC_FILES ${PROJECT_SOURCE_DIR}/legacy/gsplat/rasterizer/*.cu ${PROJECT_SOURCE_DIR}/legacy/gsplat/rasterizer/*.cuh)
 
 add_library(rasterizer ${RASTERIZER_SRC_FILES})
 target_link_libraries(rasterizer PUBLIC cuda)
@@ -282,12 +296,12 @@ set_target_properties(rasterizer PROPERTIES LINKER_LANGUAGE CXX)
 
 ##############################################################
 #####################   gsplat c++ binding
-file(GLOB GSPLAT_SRC_FILES ${PROJECT_SOURCE_DIR}/gsplat/*.cpp)
+file(GLOB GSPLAT_SRC_FILES ${PROJECT_SOURCE_DIR}/legacy/gsplat/*.cpp)
 add_library(gsplat ${GSPLAT_SRC_FILES})
 install(TARGETS gsplat DESTINATION bin)
 set_property(TARGET gsplat PROPERTY CXX_STANDARD 17)
 target_include_directories(gsplat PRIVATE
-    ${PROJECT_SOURCE_DIR}/gsplat/rasterizer
+    ${PROJECT_SOURCE_DIR}/legacy/gsplat/rasterizer
     ${PROJECT_SOURCE_DIR}/include
     ${GPU_INCLUDE_DIRS}
 )
@@ -305,7 +319,7 @@ target_compile_definitions(gsplat PRIVATE USE_CUDA)
 
 
 file(GLOB OURS_SRC_FILES ${PROJECT_SOURCE_DIR}/src/*.cpp)
-file(GLOB SLAM_SRC_FILES ${PROJECT_SOURCE_DIR}/slam/*.cpp ${PROJECT_SOURCE_DIR}/slam/TsdfFusion/*.cpp)
+file(GLOB SLAM_SRC_FILES ${PROJECT_SOURCE_DIR}/legacy/slam/*.cpp ${PROJECT_SOURCE_DIR}/legacy/slam/TsdfFusion/*.cpp)
 SET(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -march=native")
 
 ##############################################################
@@ -335,9 +349,9 @@ if(USE_TENSORBOARD)
 endif()
 target_include_directories(slam_trainer PRIVATE
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/slam
-    ${PROJECT_SOURCE_DIR}/gsplat
-    ${PROJECT_SOURCE_DIR}/InfiniTAM
+    ${PROJECT_SOURCE_DIR}/legacy/slam
+    ${PROJECT_SOURCE_DIR}/legacy/gsplat
+    ${PROJECT_SOURCE_DIR}/legacy/InfiniTAM
     ${tinyply_SOURCE_DIR}/source
 )
 
@@ -367,9 +381,9 @@ if(Boost_FOUND)
     target_include_directories(remote_viewer PRIVATE
         ${Boost_INCLUDE_DIRS}
         ${PROJECT_SOURCE_DIR}/include
-        ${PROJECT_SOURCE_DIR}/slam
-        ${PROJECT_SOURCE_DIR}/gsplat
-        ${PROJECT_SOURCE_DIR}/InfiniTAM
+        ${PROJECT_SOURCE_DIR}/legacy/slam
+        ${PROJECT_SOURCE_DIR}/legacy/gsplat
+        ${PROJECT_SOURCE_DIR}/legacy/InfiniTAM
         ${tinyply_SOURCE_DIR}/source
     )
     if(USE_TENSORBOARD)
@@ -405,9 +419,9 @@ if(USE_TENSORBOARD)
 endif()
 target_include_directories(online_slam PRIVATE
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/slam
-    ${PROJECT_SOURCE_DIR}/gsplat
-    ${PROJECT_SOURCE_DIR}/InfiniTAM
+    ${PROJECT_SOURCE_DIR}/legacy/slam
+    ${PROJECT_SOURCE_DIR}/legacy/gsplat
+    ${PROJECT_SOURCE_DIR}/legacy/InfiniTAM
     ${tinyply_SOURCE_DIR}/source
 )
 
@@ -437,3 +451,61 @@ if (MSVC)
 endif (MSVC)
 
 add_compile_definitions(GLOG_USE_GLOG_EXPORT)
+
+# ============================================================================
+# Python Bindings via Nanobind
+# ============================================================================
+if(SAP_BUILD_PYTHON)
+    message(STATUS "Building Python bindings...")
+
+    # Find Python
+    find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+
+    # Find or fetch Nanobind
+    find_package(nanobind QUIET)
+    if(NOT nanobind_FOUND)
+        message(STATUS "Nanobind not found, fetching from GitHub...")
+        FetchContent_Declare(nanobind
+            GIT_REPOSITORY https://github.com/wjakob/nanobind.git
+            GIT_TAG v2.2.0
+        )
+        FetchContent_MakeAvailable(nanobind)
+    endif()
+
+    # Build the Python extension module
+    nanobind_add_module(_core
+        STABLE_ABI
+        NB_STATIC
+        src/bindings/module.cpp
+        src/slam/tracker.cpp
+    )
+
+    target_include_directories(_core PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${OpenCV_INCLUDE_DIRS}
+    )
+
+    target_link_libraries(_core PRIVATE
+        Eigen3::Eigen
+        ${OpenCV_LIBS}
+    )
+
+    # Install the extension to the Python package
+    install(TARGETS _core LIBRARY DESTINATION python/spatial_ai_playground)
+
+    message(STATUS "Python bindings configured for ${Python_EXECUTABLE}")
+endif()
+
+# ============================================================================
+# New Spatial AI Playground Core Library
+# ============================================================================
+# This is the new modular architecture (separate from legacy)
+add_library(sap_core INTERFACE)
+target_include_directories(sap_core INTERFACE
+    ${PROJECT_SOURCE_DIR}/core/include
+    ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(sap_core INTERFACE
+    Eigen3::Eigen
+    ${OpenCV_LIBS}
+)
