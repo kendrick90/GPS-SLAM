@@ -20,7 +20,11 @@ IF(${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang")
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libstdc++ -Wno-deprecated-declarations -Wno-unused-function")
 ENDIF()
 
-IF(NOT MSVC_IDE)
+IF(MSVC)
+  # MSVC-specific flags
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W3 /wd4996 /wd4267 /wd4244")
+ELSE()
+  # GCC/Clang flags
   SET(CFLAGS_WARN "-Wall -Wextra -Wno-unused-parameter -Wno-strict-aliasing")
   SET(CMAKE_CXX_FLAGS "-fPIC -O3 -w -march=native ${CFLAGS_WARN} ${CMAKE_CXX_FLAGS}")
 ENDIF()

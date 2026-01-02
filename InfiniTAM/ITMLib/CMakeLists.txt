@@ -606,4 +606,6 @@ SOURCE_GROUP(Utils FILES ${ITMLIB_UTILS_SOURCES} ${ITMLIB_UTILS_HEADERS})
 ##########################################
 
 INCLUDE(${PROJECT_SOURCE_DIR}/cmake/SetCUDALibTarget.cmake)
-target_link_libraries(${targetname} PUBLIC OpenMP::OpenMP_CXX)
+if(TARGET OpenMP::OpenMP_CXX)
+    target_link_libraries(${targetname} PUBLIC OpenMP::OpenMP_CXX)
+endif()

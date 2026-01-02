@@ -30,8 +30,10 @@ void Pipeline::loadConfig(const YAML::Node &config, const std::string &workspace
         createDirectory(log_path, true);
         createDirectory(eval_path, true);
         createDirectory(tb_path, true);
+#ifdef USE_TENSORBOARD
         GOOGLE_PROTOBUF_VERIFY_VERSION;
         tb_logger = new TensorBoardLogger((fs::path(tb_path) / "tfevents.pb").string());
+#endif
     }
 }
 
@@ -44,7 +46,7 @@ void Pipeline::save(RawGaussianModel &model, std::vector<Camera> cams)
     }
     std::cout << "save model start" << std::endl;
     std::string save_path = model_path;
-    createDirectory(fs::path(save_path) / "point_cloud", true);
+    createDirectory((fs::path(save_path) / "point_cloud").string(), true);
 
     saveCfgArgs((fs::path(save_path) / "cfg_args").string(), model.getMaxSH());
     model.saveParamsPly((fs::path(save_path) / "point_cloud" / "point_cloud.ply").string());
@@ -129,6 +131,7 @@ void Pipeline::logResults(TensorDict &render_res, TensorDict &log_res, const Cam
 // 记录Dict中的标量到tensorboard里
 void Pipeline::logScalars(TensorDict &scalars, int iter)
 {
+#ifdef USE_TENSORBOARD
     torch::NoGradGuard noGrad;
     for (auto &pair : scalars)
     {
@@ -144,11 +147,11 @@ void Pipeline::logScalars(TensorDict &scalars, int iter)
             else
                 std::cout << key << " unsupported data type!" << dtype << std::endl;
         }
-        // else
-        // {
-        //     std::cout << key << " tensor numel is not 1!" << std::endl;
-        // }
     }
+#else
+    (void)scalars;
+    (void)iter;
+#endif
 }
 
 // 按照原始3dgs的pipeline进行训练

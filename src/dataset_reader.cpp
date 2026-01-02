@@ -412,7 +412,7 @@ void DatasetReader::savePose(const std::string &save_dir)
         torch::Tensor slam_pose = train_vec[i].c2w_slam;
         // std::cout << slam_pose << std::endl;
         std::string pose_file_name = "frame" + train_vec[i].getFrameID() + ".txt";
-        std::string save_file_name = fs::path(save_dir) / pose_file_name;
+        std::string save_file_name = (fs::path(save_dir) / pose_file_name).string();
         saveTensorTXT(slam_pose, save_file_name);
     }
 }

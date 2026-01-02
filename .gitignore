@@ -21,3 +21,4 @@ venv/
 # Downloaded files
 *.zip
 *.deb
+/viewer

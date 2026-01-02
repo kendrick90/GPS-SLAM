@@ -16,7 +16,8 @@ OPTION(WITH_CUDA "Build with CUDA support?" ${CUDAToolkit_FOUND})
 
 IF(WITH_CUDA)
   message(STATUS "Building with CUDA support")
-  SET(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89)
+  # CUDA 13+ dropped compute_70 (Volta), use 75+ (Turing and newer)
+  SET(CMAKE_CUDA_ARCHITECTURES 75;80;86;89;90)
 
   # Auto-detect the CUDA compute capability.
   # SET(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")

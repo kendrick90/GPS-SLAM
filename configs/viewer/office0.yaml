@@ -4,7 +4,7 @@ work_mode: eval
 port: 6688
 
 READER:
-  input_dir: data/replica/office0
+  input_dir: data/replica_processed/office0
   image_path: camera
   pose_path: camera
   depth_path: depth

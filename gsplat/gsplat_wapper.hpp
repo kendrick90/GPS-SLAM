@@ -4,6 +4,7 @@
 #include "rasterizer/bindings.h"
 #include "rasterizer/ssim.h"
 #include "rasterizer/simple_knn.h"
+#include "platform_time.h"
 
 
 #include <torch/torch.h>

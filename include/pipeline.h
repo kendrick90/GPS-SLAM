@@ -1,9 +1,12 @@
 #pragma once
 
 #include "raw_gs_model.h"
+#ifdef USE_TENSORBOARD
 #include "tensorboard_logger.h"
+#endif
 #include "file_utils.h"
 #include "cv_utils.h"
+#include "platform_time.h"
 
 class Pipeline
 {
@@ -76,7 +79,9 @@ public:
     YAML::Node weight_configs; // 权重的有关参数
     YAML::Node vis_configs;    // 可视化图片的有关参数
     // output setting
+#ifdef USE_TENSORBOARD
     TensorBoardLogger *tb_logger; // tensoboard的记录器
+#endif
     std::string workspace_dir, model_path, log_path, eval_path, tb_path;
     int log_iter;
 

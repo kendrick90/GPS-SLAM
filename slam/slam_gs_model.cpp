@@ -1,4 +1,5 @@
 #include "slam_gs_model.h"
+#include "platform_time.h"
 
 #define LOG_MODEL_TIME
 

@@ -2,6 +2,13 @@
 #include "slam_pipeline.h"
 #include "InfiniTAM_tools.h"
 
+#ifdef _WIN32
+#include <cstdlib>
+inline int setenv(const char* name, const char* value, int /*overwrite*/) {
+    return _putenv_s(name, value);
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     std::cout << "ours trainer demo!" << std::endl;

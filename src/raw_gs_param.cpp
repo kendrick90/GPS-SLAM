@@ -2,6 +2,7 @@
 #include "kdtree_tensor.h"
 #include "tensor_math.h"
 #include "gsplat_wapper.hpp"
+#include "platform_time.h"
 #include <fstream>
 
 using namespace torch::indexing;

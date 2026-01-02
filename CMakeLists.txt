@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.21)
 project(opensplat)
 
+# Prevent Windows.h from defining min/max macros
+if(WIN32)
+    add_definitions(-DNOMINMAX)
+endif()
+
 set(GPU_RUNTIME "CUDA" )
 set(OPENSPLAT_MAX_CUDA_COMPATIBILITY OFF CACHE BOOL "Build for maximum CUDA device compatibility")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
@@ -91,15 +96,20 @@ if(NOT tinyply_FOUND)
     FetchContent_MakeAvailable(tinyply)
 endif()
 
-# tensorboard_logger (try find_package first, then FetchContent)
-find_package(tensorboard_logger QUIET)
-if(NOT tensorboard_logger_FOUND)
-    message(STATUS "tensorboard_logger not found, fetching from GitHub...")
-    FetchContent_Declare(tensorboard_logger
-        GIT_REPOSITORY https://github.com/RustingSword/tensorboard_logger.git
-        GIT_TAG master
-    )
-    FetchContent_MakeAvailable(tensorboard_logger)
+# tensorboard_logger (optional - has protobuf version conflicts on Windows)
+option(USE_TENSORBOARD "Enable TensorBoard logging" OFF)
+if(USE_TENSORBOARD)
+    find_package(tensorboard_logger QUIET)
+    if(NOT tensorboard_logger_FOUND)
+        message(STATUS "tensorboard_logger not found, fetching from GitHub...")
+        FetchContent_Declare(tensorboard_logger
+            GIT_REPOSITORY https://github.com/RustingSword/tensorboard_logger.git
+            GIT_TAG master
+        )
+        FetchContent_MakeAvailable(tensorboard_logger)
+    endif()
+else()
+    message(STATUS "TensorBoard logging disabled (USE_TENSORBOARD=OFF)")
 endif()
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -123,8 +133,8 @@ else()
     endif()
     if(NOT OPENSPLAT_MAX_CUDA_COMPATIBILITY)
         if(NOT CMAKE_CUDA_ARCHITECTURES)
-            # CUDA 12.4 supports compute 50-90
-            SET(CMAKE_CUDA_ARCHITECTURES 70;75;80;86;89;90)
+            # CUDA 13+ dropped compute_70 (Volta), use 75+ (Turing and newer)
+            SET(CMAKE_CUDA_ARCHITECTURES 75;80;86;89;90)
         endif()
     else()
         # Build for maximum compatibility
@@ -179,9 +189,24 @@ add_subdirectory(InfiniTAM)
 
 
 ##################### LIBTORCH and OpenCV ############################
-find_package(Torch REQUIRED)
+# Find OpenCV BEFORE Torch to avoid protobuf target conflicts
+# (OpenCV from vcpkg uses vcpkg's protobuf, Torch ships its own)
 find_package(OpenCV REQUIRED)
 set(OpenCV_LIBS opencv_core opencv_imgproc opencv_highgui opencv_calib3d)
+
+# Workaround: CUDA 12.x removed nvToolsExt as a separate library (now header-only NVTX3)
+# LibTorch's cmake expects CUDA::nvToolsExt, so create an empty interface target if missing
+if(NOT TARGET CUDA::nvToolsExt)
+    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
+    # NVTX3 is header-only in CUDA 12+, just need the include path
+    if(CUDAToolkit_INCLUDE_DIRS)
+        set_target_properties(CUDA::nvToolsExt PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${CUDAToolkit_INCLUDE_DIRS}")
+    endif()
+    message(STATUS "Created CUDA::nvToolsExt interface target for CUDA 12+ compatibility")
+endif()
+
+find_package(Torch REQUIRED)
 
 ##################### My LIBS ############################
 # Legacy ThirdLibs support
@@ -202,11 +227,17 @@ else()
     endif()
 endif()
 
-# Protobuf
-find_package(Protobuf REQUIRED)
-message(STATUS "Protobuf_VERSION: ${Protobuf_VERSION}")
-message(STATUS "Protobuf_INCLUDE_DIRS: ${Protobuf_INCLUDE_DIRS}")
-message(STATUS "Protobuf_LIBRARIES: ${Protobuf_LIBRARIES}")
+# Protobuf - use the one from Torch/Caffe2, skip explicit find if already defined
+if(NOT TARGET protobuf::libprotobuf)
+    find_package(Protobuf REQUIRED)
+    message(STATUS "Protobuf_VERSION: ${Protobuf_VERSION}")
+    message(STATUS "Protobuf_INCLUDE_DIRS: ${Protobuf_INCLUDE_DIRS}")
+    message(STATUS "Protobuf_LIBRARIES: ${Protobuf_LIBRARIES}")
+else()
+    message(STATUS "Using protobuf from Torch/Caffe2")
+    # Get protobuf libraries from the target
+    get_target_property(Protobuf_LIBRARIES protobuf::libprotobuf LOCATION)
+endif()
 
 # eigen
 find_package(Eigen3 REQUIRED NO_MODULE)
@@ -214,7 +245,25 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 # Pangolin
 find_package(Pangolin 0.8 REQUIRED)
 
-find_library(NVML_LIBRARY nvidia-ml PATHS /usr/lib/x86_64-linux-gnu)
+# Boost (for remote_viewer networking)
+find_package(Boost COMPONENTS system QUIET)
+if(Boost_FOUND)
+    message(STATUS "Found Boost: ${Boost_VERSION}")
+else()
+    message(STATUS "Boost not found - remote_viewer will not be built")
+endif()
+
+# NVML (nvidia-ml) - platform specific
+if(WIN32)
+    # On Windows, NVML is nvml.lib in the CUDA toolkit
+    find_library(NVML_LIBRARY nvml PATHS "${CUDAToolkit_LIBRARY_DIR}" NO_DEFAULT_PATH)
+    if(NOT NVML_LIBRARY)
+        set(NVML_LIBRARY "") # Make optional
+        message(STATUS "NVML not found - GPU monitoring disabled")
+    endif()
+else()
+    find_library(NVML_LIBRARY nvidia-ml PATHS /usr/lib/x86_64-linux-gnu)
+endif()
 
 ##############################################################
 #####################   gsplat rasterizer
@@ -239,6 +288,7 @@ install(TARGETS gsplat DESTINATION bin)
 set_property(TARGET gsplat PROPERTY CXX_STANDARD 17)
 target_include_directories(gsplat PRIVATE
     ${PROJECT_SOURCE_DIR}/gsplat/rasterizer
+    ${PROJECT_SOURCE_DIR}/include
     ${GPU_INCLUDE_DIRS}
 )
 target_link_libraries(gsplat PUBLIC ${STDPPFS_LIBRARY} ${GPU_LIBRARIES} ${RASTERIZER_LIBS} ${TORCH_LIBRARIES} ${OpenCV_LIBS})
@@ -266,7 +316,7 @@ target_link_libraries(slam_trainer PUBLIC
         Eigen3::Eigen
         indicators::indicators
         tinyply
-        tensorboard_logger
+        $<$<BOOL:${USE_TENSORBOARD}>:tensorboard_logger>
         yaml-cpp::yaml-cpp
         ${Protobuf_LIBRARIES}
         InputSource
@@ -277,9 +327,12 @@ target_link_libraries(slam_trainer PUBLIC
         cuda
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
-        glut
+        ${GLUT_LIBRARY}
         ${K4A_LIBRARIES}
 )
+if(USE_TENSORBOARD)
+    target_compile_definitions(slam_trainer PRIVATE USE_TENSORBOARD)
+endif()
 target_include_directories(slam_trainer PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/slam
@@ -289,33 +342,42 @@ target_include_directories(slam_trainer PRIVATE
 )
 
 #####################   ours implementation of remote viewer
-add_executable(remote_viewer remote_viewer.cpp ${OURS_SRC_FILES} ${SLAM_SRC_FILES})
-target_link_libraries(remote_viewer PUBLIC
-        gsplat
-        Eigen3::Eigen
-        indicators::indicators
-        tinyply
-        tensorboard_logger
-        yaml-cpp::yaml-cpp
-        ${Protobuf_LIBRARIES}
-        InputSource
-        ITMLib
-        MiniSlamGraphLib
-        ORUtils
-        FernRelocLib
-        cuda
-        ${NVML_LIBRARY}
-        ${OPENGL_LIBRARY}
-        glut
-        ${K4A_LIBRARIES}
-)
-target_include_directories(remote_viewer PRIVATE
-    ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/slam
-    ${PROJECT_SOURCE_DIR}/gsplat
-    ${PROJECT_SOURCE_DIR}/InfiniTAM
-    ${tinyply_SOURCE_DIR}/source
-)
+if(Boost_FOUND)
+    add_executable(remote_viewer remote_viewer.cpp ${OURS_SRC_FILES} ${SLAM_SRC_FILES})
+    target_link_libraries(remote_viewer PUBLIC
+            gsplat
+            Eigen3::Eigen
+            indicators::indicators
+            tinyply
+            Boost::system
+            $<$<BOOL:${USE_TENSORBOARD}>:tensorboard_logger>
+            yaml-cpp::yaml-cpp
+            ${Protobuf_LIBRARIES}
+            InputSource
+            ITMLib
+            MiniSlamGraphLib
+            ORUtils
+            FernRelocLib
+            cuda
+            ${NVML_LIBRARY}
+            ${OPENGL_LIBRARY}
+            ${GLUT_LIBRARY}
+            ${K4A_LIBRARIES}
+    )
+    target_include_directories(remote_viewer PRIVATE
+        ${Boost_INCLUDE_DIRS}
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/slam
+        ${PROJECT_SOURCE_DIR}/gsplat
+        ${PROJECT_SOURCE_DIR}/InfiniTAM
+        ${tinyply_SOURCE_DIR}/source
+    )
+    if(USE_TENSORBOARD)
+        target_compile_definitions(remote_viewer PRIVATE USE_TENSORBOARD)
+    endif()
+else()
+    message(STATUS "Skipping remote_viewer (requires Boost)")
+endif()
 
 #####################   online SLAM with Azure Kinect
 add_executable(online_slam online_slam.cpp ${OURS_SRC_FILES} ${SLAM_SRC_FILES})
@@ -324,7 +386,7 @@ target_link_libraries(online_slam PUBLIC
         Eigen3::Eigen
         indicators::indicators
         tinyply
-        tensorboard_logger
+        $<$<BOOL:${USE_TENSORBOARD}>:tensorboard_logger>
         yaml-cpp::yaml-cpp
         ${Protobuf_LIBRARIES}
         InputSource
@@ -335,9 +397,12 @@ target_link_libraries(online_slam PUBLIC
         cuda
         ${NVML_LIBRARY}
         ${OPENGL_LIBRARY}
-        glut
+        ${GLUT_LIBRARY}
         ${K4A_LIBRARIES}
 )
+if(USE_TENSORBOARD)
+    target_compile_definitions(online_slam PRIVATE USE_TENSORBOARD)
+endif()
 target_include_directories(online_slam PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/slam
@@ -358,7 +423,11 @@ if (MSVC)
     endif()
     set(DLLS_TO_COPY ${TORCH_DLLS} ${OPENCV_DLL} ${K4A_DLLS})
     # Copy DLLs to all executable output directories
-    foreach(TARGET_NAME slam_trainer remote_viewer online_slam)
+    set(TARGETS_TO_COPY slam_trainer online_slam)
+    if(Boost_FOUND)
+        list(APPEND TARGETS_TO_COPY remote_viewer)
+    endif()
+    foreach(TARGET_NAME ${TARGETS_TO_COPY})
         add_custom_command(TARGET ${TARGET_NAME}
             POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different

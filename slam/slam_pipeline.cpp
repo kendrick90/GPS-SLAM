@@ -1,5 +1,6 @@
 #include "slam_pipeline.h"
 #include "tensor_math.h"
+#include "platform_time.h"
 #include <cstdio>
 
 namespace fs = std::filesystem;
@@ -56,7 +57,7 @@ void SLAMPipeline::SLAMTrainCams(SLAMGaussianModel &model, std::vector<Camera> &
         localFrameRaycast_start, localFrameRaycast_end,
         keyFrameRaycast_end, initNewGaussians_end, localOptimize_end, removeGaussian_end, checkError_end;
     double perFrame_total = 0.0, localFrameRaycast_total = 0.0, keyFrameRaycast_total = 0.0, initNewGaussians_total = 0.0, localOptimize_total = 0.0, removeGaussian_total = 0.0, checkError_total = 0.0;
-    FILE *time_log_file = fopen((fs::path(workspace_dir) / "time_log.txt").c_str(), "w");
+    FILE *time_log_file = fopen((fs::path(workspace_dir) / "time_log.txt").string().c_str(), "w");
     if (time_log_file == nullptr)
     {
         perror("Failed to open file");

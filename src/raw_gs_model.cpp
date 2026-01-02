@@ -2,6 +2,7 @@
 
 #include "raw_gs_model.h"
 #include "tensor_math.h"
+#include "platform_time.h"
 
 using namespace torch::indexing;
 using namespace torch::autograd;

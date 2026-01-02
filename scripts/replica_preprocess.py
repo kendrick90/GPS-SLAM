@@ -181,8 +181,8 @@ w = 1200
 h = 680
 scale = 6553.5
 
-input_dir = "data/Replica_raw/office1" # raw format replica scene dir
-output_dir = "data/replica/office1" # ours format replica scene dir
+input_dir = "data/Replica/office0" # raw format replica scene dir
+output_dir = "data/replica_processed/office0" # ours format replica scene dir
 frame_sample_num = 2000
 
 generate_dir(output_dir)
