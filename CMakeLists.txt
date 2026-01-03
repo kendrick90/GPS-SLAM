@@ -148,7 +148,7 @@ else()
     if(NOT OPENSPLAT_MAX_CUDA_COMPATIBILITY)
         if(NOT CMAKE_CUDA_ARCHITECTURES)
             # CUDA 13+ dropped compute_70 (Volta), use 75+ (Turing and newer)
-            SET(CMAKE_CUDA_ARCHITECTURES 75;80;86;89;90)
+            SET(CMAKE_CUDA_ARCHITECTURES native)
         endif()
     else()
         # Build for maximum compatibility

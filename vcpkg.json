@@ -23,7 +23,9 @@
     },
     "freeglut",
     "yaml-cpp",
-    "boost-system"
+    "boost-system",
+    "boost-asio",
+    "boost-beast"
   ],
   "features": {
     "azure-kinect": {
