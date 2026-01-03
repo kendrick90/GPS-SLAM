@@ -1,0 +1,160 @@
+# ============================================================================
+# Quest 3 Input Source Configuration
+# Meta Quest 3 stereo passthrough cameras with depth, IMU, and tracking
+# ============================================================================
+
+workspace_dir: output_online
+dev_id: 0
+work_mode: online
+viewer_port: 6688  # TCP port for SIBR GS viewer (0 = disabled)
+
+# ============================================================================
+# Quest 3 Input Source Settings
+# ============================================================================
+INPUT:
+  plugin: quest_3
+
+  # Camera mode selection
+  # Options:
+  #   - left: Left passthrough camera only
+  #   - right: Right passthrough camera only
+  #   - stereo: Both cameras synchronized (recommended for SLAM)
+  #   - center_virtual: Software-rectified virtual center camera
+  camera_mode: stereo
+
+  # Camera resolution
+  # Options:
+  #   - 960p: 1280x960 (original passthrough resolution)
+  #   - 1280: 1280x1280 (HzOS v83+, square format)
+  #   - 720p: 1280x720 (cropped 16:9 aspect ratio)
+  #   - native: Native sensor resolution
+  resolution: 1280
+
+  # Target frame rate (Hz)
+  # Options: 30, 60, 72
+  target_fps: 30
+
+  # Depth mode
+  # Options:
+  #   - off: No depth (RGB only)
+  #   - environmental: Stereo + ML depth estimation (general use)
+  #   - hand_occlusion: Optimized for hand depth/occlusion
+  #   - full: Highest quality depth (more GPU intensive)
+  depth_mode: environmental
+
+  depth_aligned_to_color: true
+  auto_exposure: true
+  manual_exposure_ms: 8.0
+  sync_timestamps: true
+  timestamp_offset_ns: 0
+
+# ============================================================================
+# Sensor Options
+# ============================================================================
+SENSORS:
+  enable_imu: true
+  enable_hand_tracking: true
+  enable_eye_tracking: false  # Requires user permission
+
+# ============================================================================
+# Connection Mode
+# ============================================================================
+CONNECTION:
+  # Options: on_device, usb_link, air_link, streaming
+  mode: on_device
+  host_address: ""
+  port: 8888
+
+# ============================================================================
+# SLAM Pipeline Configuration
+# ============================================================================
+SLAM:
+  # Tracker: icp, feature, direct, hybrid, droid, quest_native
+  tracker_type: icp
+  # Mapper: tsdf, gaussian, surfel, point_cloud, neural
+  mapper_type: gaussian
+  use_quest_tracking: true
+  enable_loop_closure: false
+  loop_closure_method: bow
+
+# ============================================================================
+# Gaussian Splatting Pipeline
+# ============================================================================
+PIPE:
+  train_method: ges
+  max_iterations: 10000
+  enable_densify: false
+  eval_after_train: false
+  save_after_train: true
+  model_path: "/gs_model"
+  log_path: "/log"
+  log_iter: 100
+
+  weight_configs:
+    ssim_weight: 0.0
+    depth_weight: 0.0
+
+  vis_configs:
+    color_error_max: 0.1
+    depth_error_max: 0.1
+    depth_vis_max: 3
+    depth_vis_min: 0.2
+
+  # Online SLAM settings
+  new_gs_sample_ratio: 0.1
+  color_error_thres: 0.05
+  local_opt_iters: 10
+  local_opt_interval: 10
+  keyframe_theta_thres: 30
+  keyframe_trans_thres: 0.30
+  keyframe_select_max: 7
+
+  TSDF:
+    voxel_size: 0.005
+    trunc_dist: 0.02
+    viewFrustum_min: 0.2
+    viewFrustum_max: 3.0
+
+# ============================================================================
+# Model Parameters
+# ============================================================================
+MODEL:
+  render_method: ges
+  sh_degree: 3
+  max_init_scale: 0.01
+  default_opacities: 0.5
+  means_lr: 0.00016
+  scales_lr: 0.005
+  quats_lr: 0.001
+  featuresDc_lr: 0.0025
+  opacities_lr: 5e-2
+
+# ============================================================================
+# Rerun Visualization Settings
+# ============================================================================
+RERUN:
+  enabled: true
+  application_id: "spatial-ai-playground"
+  recording_id: ""
+  spawn_viewer: true
+  connect_addr: ""
+  save_path: ""
+
+  # Logging options
+  log_rgb: true
+  log_depth: true
+  log_poses: true
+  log_point_cloud: true
+  log_gaussians: true
+  log_imu: true
+  log_hands: true
+  log_eye_gaze: false
+
+  # Performance
+  rgb_downsample: 1
+  depth_downsample: 2
+  point_cloud_stride: 4
+
+  time_name: "frame"
+  use_wall_clock: false
+  log_level: standard

@@ -14,6 +14,8 @@ project(spatial-ai-playground VERSION 0.1.0 LANGUAGES CXX)
 option(SAP_BUILD_PYTHON "Build Python bindings via Nanobind" ON)
 option(SAP_BUILD_LEGACY "Build legacy GPS-SLAM executables" ON)
 option(SAP_BUILD_TESTS "Build tests" OFF)
+option(SAP_WITH_RERUN "Enable Rerun.io visualization" ON)
+option(SAP_WITH_QUEST3 "Enable Meta Quest 3 support" OFF)
 
 # Prevent Windows.h from defining min/max macros
 if(WIN32)
@@ -263,6 +265,35 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 
 # Pangolin
 find_package(Pangolin 0.8 REQUIRED)
+
+# ============================================================================
+# Rerun.io Visualization (optional)
+# ============================================================================
+if(SAP_WITH_RERUN)
+    list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+    include(FindRerun)
+    if(RERUN_FOUND)
+        message(STATUS "Rerun SDK enabled for SLAM visualization")
+    else()
+        message(WARNING "Rerun SDK not found - visualization features disabled")
+        set(SAP_WITH_RERUN OFF)
+    endif()
+endif()
+
+# ============================================================================
+# Meta Quest 3 Support (optional)
+# ============================================================================
+if(SAP_WITH_QUEST3)
+    list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+    set(WITH_QUEST3 ON)
+    include(UseQuest3)
+    if(QUEST3_FOUND)
+        message(STATUS "Quest 3 support enabled")
+    else()
+        message(WARNING "Quest 3 support not available")
+        set(SAP_WITH_QUEST3 OFF)
+    endif()
+endif()
 
 # Boost (for remote_viewer networking)
 find_package(Boost COMPONENTS system QUIET)
