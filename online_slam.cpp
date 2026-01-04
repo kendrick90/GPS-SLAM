@@ -6,6 +6,7 @@
  *   1. TSDF fusion for geometry
  *   2. Incremental Gaussian splatting optimization
  *   3. Real-time pose tracking
+ *   4. Optional TCP server for SIBR GS viewer
  *
  * Usage:
  *   ./online_slam [config.yaml] [options]
@@ -20,7 +21,18 @@
  *   --max-frames <N>       Stop after N frames (0 = unlimited)
  *   --output <dir>         Output directory for results
  *   --no-display           Disable live visualization windows
+ *   --viewer-port <port>   Enable TCP server for SIBR viewer on port (default: 0 = disabled)
  */
+
+// Boost.Asio must be included first on Windows to avoid WinSock conflicts
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <boost/asio.hpp>
+#undef WIN32_LEAN_AND_MEAN
+#else
+#include <boost/asio.hpp>
+#endif
 
 #include <iostream>
 #include <csignal>
@@ -28,10 +40,17 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <mutex>
+#include <sstream>
+#include <iomanip>
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+#include "json.hpp"
+using json = nlohmann::json;
 
 #include <yaml-cpp/yaml.h>
 #include <torch/torch.h>
@@ -73,6 +92,204 @@ void signalHandler(int signum)
 }
 #endif
 
+// ============================================================================
+// Viewer Server - TCP server for SIBR GS viewer
+// ============================================================================
+
+class ViewerServer {
+public:
+    ViewerServer(int port, SLAMGaussianModel* model, SLAMPipeline* pipeline)
+        : port_(port), model_(model), pipeline_(pipeline), running_(false) {}
+
+    ~ViewerServer() { stop(); }
+
+    void start() {
+        if (port_ <= 0) return;
+        running_ = true;
+        serverThread_ = std::thread(&ViewerServer::serverLoop, this);
+        std::cout << "Viewer server started on port " << port_ << "\n";
+    }
+
+    void stop() {
+        running_ = false;
+        if (serverThread_.joinable()) {
+            serverThread_.join();
+        }
+    }
+
+    void updateCurrentPose(const torch::Tensor& pose) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        currentPose_ = pose.clone();
+    }
+
+private:
+    int port_;
+    SLAMGaussianModel* model_;
+    SLAMPipeline* pipeline_;
+    std::atomic<bool> running_;
+    std::thread serverThread_;
+    std::mutex mutex_;
+    torch::Tensor currentPose_;
+
+    Camera readMessage(boost::asio::ip::tcp::socket& sock) {
+        char lengthBuffer[4];
+        boost::asio::read(sock, boost::asio::buffer(lengthBuffer, 4));
+        int messageLength = *reinterpret_cast<int*>(lengthBuffer);
+
+        std::vector<char> messageBuffer(messageLength);
+        boost::asio::read(sock, boost::asio::buffer(messageBuffer, messageLength));
+
+        std::string messageStr(messageBuffer.begin(), messageBuffer.end());
+        json message = json::parse(messageStr);
+
+        float fov_x = message["fov_x"];
+        float fov_y = message["fov_y"];
+        float resolution_x = message["resolution_x"];
+        float resolution_y = message["resolution_y"];
+        float fx = resolution_x / (2.0f * tan(fov_x / 2.0f));
+        float fy = resolution_y / (2.0f * tan(fov_y / 2.0f));
+        float cx = resolution_x / 2;
+        float cy = resolution_y / 2;
+
+        std::vector<float> pose_matrix_data = message["pose"];
+        torch::Tensor pose_matrix = torch::from_blob(
+            pose_matrix_data.data(), {4, 4},
+            torch::TensorOptions().dtype(torch::kFloat32)
+        ).transpose(0, 1).clone();  // Clone to own the data
+        pose_matrix.index({torch::indexing::Slice(), 1}) *= -1;
+        pose_matrix.index({torch::indexing::Slice(), 2}) *= -1;
+
+        Camera cam(int(resolution_x), int(resolution_y), fx, fy, cx, cy, false, pose_matrix.clone());
+        cam.c2w_slam = pose_matrix.clone();  // Set c2w_slam for viewer rendering
+        return cam;
+    }
+
+    void sendImage(boost::asio::ip::tcp::socket& sock, const cv::Mat& img) {
+        uint32_t img_width = img.cols;
+        uint32_t img_height = img.rows;
+        boost::asio::write(sock, boost::asio::buffer(&img_width, sizeof(uint32_t)));
+        boost::asio::write(sock, boost::asio::buffer(&img_height, sizeof(uint32_t)));
+
+        // Convert to RGB and ensure contiguous memory layout
+        cv::Mat send_img;
+        cv::cvtColor(img, send_img, cv::COLOR_BGR2RGB);
+        if (!send_img.isContinuous()) {
+            send_img = send_img.clone();
+        }
+
+        uint32_t img_byte = img_width * img_height * 3;
+        boost::asio::write(sock, boost::asio::buffer(send_img.data, img_byte));
+    }
+
+    void sendTensor(boost::asio::ip::tcp::socket& sock, const torch::Tensor& tensor) {
+        // Must move to CPU before getting data pointer for socket write
+        torch::Tensor contiguous_tensor = tensor.cpu().contiguous();
+        float* data_ptr = contiguous_tensor.data_ptr<float>();
+        uint32_t num_bytes = contiguous_tensor.numel() * sizeof(float);
+        boost::asio::write(sock, boost::asio::buffer(data_ptr, num_bytes));
+    }
+
+    void sendString(boost::asio::ip::tcp::socket& sock, const std::string& message) {
+        uint32_t infoLen = static_cast<uint32_t>(message.size());
+        boost::asio::write(sock, boost::asio::buffer(&infoLen, sizeof(uint32_t)));
+        boost::asio::write(sock, boost::asio::buffer(message.data(), infoLen));
+    }
+
+    void serverLoop() {
+        try {
+            boost::asio::io_context ios;
+            boost::asio::ip::tcp::acceptor acceptor(
+                ios,
+                boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port_)
+            );
+
+            while (running_ && !g_shouldStop) {
+                try {
+                    boost::asio::ip::tcp::socket sock(ios);
+                    std::cout << "Viewer: Waiting for client on port " << port_ << "...\n";
+
+                    // Non-blocking accept with timeout
+                    acceptor.non_blocking(true);
+                    boost::system::error_code ec;
+                    while (running_ && !g_shouldStop) {
+                        acceptor.accept(sock, ec);
+                        if (!ec) break;
+                        if (ec == boost::asio::error::would_block) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            continue;
+                        }
+                        throw boost::system::system_error(ec);
+                    }
+
+                    if (!running_ || g_shouldStop) break;
+
+                    sock.non_blocking(false);
+                    std::cout << "Viewer: Client connected!\n";
+
+                    while (running_ && !g_shouldStop) {
+                        try {
+                            // Get viewer's requested camera pose
+                            Camera cam = readMessage(sock);
+
+                            // Initialize empty tensors for image/depth before toGPU()
+                            cam.image = torch::zeros({cam.height, cam.width, 3}, torch::kFloat32);
+                            cam.depth = torch::zeros({cam.height, cam.width, 1}, torch::kFloat32);
+                            cam.toGPU();
+
+                            // Use viewer's camera for rendering (allows free navigation)
+                            // Create zero depth/color since we render pure Gaussians
+                            torch::Tensor raycast_depth = torch::zeros({cam.height, cam.width, 1},
+                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                            torch::Tensor raycast_color = torch::zeros({cam.height, cam.width, 3},
+                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+                            // Render Gaussians from viewer's camera pose
+                            TensorDict render_res = model_->forward(cam, raycast_depth, raycast_color);
+                            torch::Tensor rendered_rgb = torch::clamp(render_res["rgb"], 0, 1);
+
+                            // Convert to OpenCV images
+                            cv::Mat rendered_color_img = tensorToImage(rendered_rgb);
+                            cv::Mat raycast_color_img(cam.height, cam.width, CV_8UC3, cv::Scalar(0, 0, 0));
+                            cv::Mat raycast_depth_img(cam.height, cam.width, CV_8UC3, cv::Scalar(0, 0, 0));
+
+                            // Send images to viewer
+                            sendImage(sock, rendered_color_img);
+                            sendImage(sock, rendered_color_img);  // input color
+                            sendImage(sock, raycast_color_img);
+                            sendImage(sock, raycast_depth_img);
+
+                            // Send pose info
+                            torch::Tensor curr_pose = cam.c2w_slam;
+                            auto rot = curr_pose.index({torch::indexing::Slice(0, 3), torch::indexing::Slice(0, 3)});
+                            auto trans = curr_pose.index({torch::indexing::Slice(torch::indexing::None, 3), torch::indexing::Slice(3, 4)});
+                            sendTensor(sock, rot);
+                            sendTensor(sock, trans);
+
+                            std::string info = "Online SLAM - GS: " + std::to_string(model_->getGaussianNum());
+                            sendString(sock, info);
+
+                            torch::Tensor mvp = curr_pose;
+                            sendTensor(sock, mvp);
+                        }
+                        catch (std::exception& e) {
+                            std::cout << "Viewer: Client disconnected: " << e.what() << "\n";
+                            break;
+                        }
+                    }
+                }
+                catch (std::exception& e) {
+                    std::cout << "Viewer: Connection error: " << e.what() << "\n";
+                }
+            }
+        }
+        catch (std::exception& e) {
+            std::cerr << "Viewer server error: " << e.what() << "\n";
+        }
+    }
+};
+
+// ============================================================================
+
 void printUsage(const char* progName)
 {
     std::cout << "Usage: " << progName << " [config.yaml] [options]\n\n"
@@ -85,6 +302,7 @@ void printUsage(const char* progName)
               << "  --max-frames <N>     Stop after N frames (0 = unlimited)\n"
               << "  --output <dir>       Output directory\n"
               << "  --no-display         Disable live visualization\n"
+              << "  --viewer-port <port> Enable SIBR GS viewer server on port (e.g. 6688)\n"
               << "  --help               Show this help\n";
 }
 
@@ -108,6 +326,7 @@ int main(int argc, char *argv[])
     bool enableIMU = true;  // Use IMU if available
     int maxFrames = 0;      // 0 = unlimited
     bool showDisplay = true; // Show live visualization
+    int viewerPort = 0;     // 0 = disabled, otherwise TCP port for SIBR viewer
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++)
@@ -142,6 +361,10 @@ int main(int argc, char *argv[])
         {
             showDisplay = false;
         }
+        else if (arg == "--viewer-port" && i + 1 < argc)
+        {
+            viewerPort = std::stoi(argv[++i]);
+        }
         else if (arg == "--max-frames" && i + 1 < argc)
         {
             maxFrames = std::stoi(argv[++i]);
@@ -171,6 +394,7 @@ int main(int argc, char *argv[])
     std::cout << "Max frames: " << (maxFrames == 0 ? "unlimited" : std::to_string(maxFrames)) << "\n";
     std::cout << "Output directory: " << outputDir << "\n";
     std::cout << "Live display: " << (showDisplay ? "enabled" : "disabled") << "\n";
+    std::cout << "Viewer port: " << (viewerPort > 0 ? std::to_string(viewerPort) : "disabled") << "\n";
 
     // Create output directory
     std::filesystem::create_directories(outputDir);
@@ -273,12 +497,48 @@ int main(int argc, char *argv[])
     CLIEngine *cliEngine = CLIEngine::Instance();
     cliEngine->InitialiseLive(kinect, mainEngine);
 
-    // Initialize Gaussian splatting model (if doing full SLAM)
-    // SLAMGaussianModel gsModel;
-    // SLAMPipeline pipeline;
-    // gsModel.loadConfig(config["MODEL"]);
+    // Initialize Gaussian splatting model for full GPS-SLAM
+    SLAMGaussianModel gsModel;
+    SLAMPipeline pipeline;
+    bool gaussiansEnabled = false;
+
+    // Connect pipeline to TSDF engine
+    pipeline.setTsdfEngine(cliEngine);
+
+    // Only load Gaussian config if config file was provided with PIPE section
+    if (config["PIPE"] && config["PIPE"].IsDefined()) {
+        try {
+            pipeline.loadConfig(config["PIPE"], outputDir, true);
+
+            // Load Gaussian model config
+            if (config["MODEL"] && config["MODEL"].IsDefined()) {
+                gsModel.loadConfig(config["MODEL"]);
+            }
+            gaussiansEnabled = true;
+            std::cout << "Gaussian splatting initialized!\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Failed to initialize Gaussians: " << e.what() << "\n";
+            std::cerr << "Continuing with TSDF-only mode.\n";
+        }
+    } else {
+        std::cout << "No Gaussian config provided - running TSDF-only mode.\n";
+    }
+
+    // Initialize viewer server if port specified and Gaussians enabled
+    std::unique_ptr<ViewerServer> viewerServer;
+    if (viewerPort > 0 && gaussiansEnabled) {
+        viewerServer = std::make_unique<ViewerServer>(viewerPort, &gsModel, &pipeline);
+        viewerServer->start();
+        std::cout << "SIBR viewer: connect with:\n";
+        std::cout << "  viewer\\bin\\SIBR_remoteGaussian_app_rwdi.exe -s <cameras_path> --ip 127.0.0.1 --port " << viewerPort << "\n\n";
+    } else if (viewerPort > 0 && !gaussiansEnabled) {
+        std::cout << "Warning: Viewer port specified but Gaussians not enabled. Viewer disabled.\n";
+    }
 
     std::cout << "\n=== Starting Online SLAM ===\n";
+    if (gaussiansEnabled) {
+        std::cout << "Note: Gaussian splatting will start after ~60 frames (TSDF initialization)\n\n";
+    }
     std::cout << "Controls:\n";
     std::cout << "  WASD         - Move free camera\n";
     std::cout << "  E/X          - Move up/down\n";
@@ -387,11 +647,143 @@ int main(int argc, char *argv[])
                       << " | Pose: [" << M.m30 << ", " << M.m31 << ", " << M.m32 << "]\n";
         }
 
-        // TODO: Add Gaussian splatting optimization at keyframes
-        // if (frameCount % config["PIPE"]["local_opt_interval"].as<int>() == 0)
-        // {
-        //     pipeline.localOptimization(gsModel, ...);
-        // }
+        // Gaussian splatting optimization at keyframes (only if enabled)
+        if (gaussiansEnabled) {
+            int localOptInterval = 10;  // Default: optimize every 10 frames
+            if (config["PIPE"] && config["PIPE"]["local_opt_interval"]) {
+                localOptInterval = config["PIPE"]["local_opt_interval"].as<int>();
+            }
+
+            // Wait until tracking is initialized (~50 frames) before GS optimization
+            // This ensures the TSDF has sufficient integrated data for raycasting
+            const int TRACKING_INIT_FRAMES = 60;  // Slightly more than InfiniTAM's 50
+            static bool gsStarted = false;
+
+            if (frameCount >= TRACKING_INIT_FRAMES && frameCount % localOptInterval == 0 &&
+                trackingResult == ITMTrackingState::TRACKING_GOOD) {
+                if (!gsStarted) {
+                    std::cout << "\n*** Starting Gaussian Splatting optimization at frame " << frameCount << " ***\n";
+                    gsStarted = true;
+                }
+                try {
+                    // Create Camera object from live Azure Kinect data
+                    // 1. Convert RGB image to torch tensor (HxWx3, float, 0-1)
+                    cv::Mat rgbMatLive(rgbSize.y, rgbSize.x, CV_8UC4, inputRGBImage->GetData(MEMORYDEVICE_CPU));
+                    cv::Mat rgbBGR, rgbFloat;
+                    cv::cvtColor(rgbMatLive, rgbBGR, cv::COLOR_RGBA2RGB);
+                    rgbBGR.convertTo(rgbFloat, CV_32FC3, 1.0 / 255.0);
+                    torch::Tensor imageTensor = torch::from_blob(
+                        rgbFloat.data, {rgbSize.y, rgbSize.x, 3}, torch::kFloat32
+                    ).clone();
+
+                    // 2. Convert depth image to torch tensor (HxWx1, float, in meters)
+                    cv::Mat depthMatLive(depthSize.y, depthSize.x, CV_16UC1, inputRawDepthImage->GetData(MEMORYDEVICE_CPU));
+                    cv::Mat depthFloat;
+                    depthMatLive.convertTo(depthFloat, CV_32FC1, 1.0 / 1000.0);  // mm to meters
+                    torch::Tensor depthTensor = torch::from_blob(
+                        depthFloat.data, {depthSize.y, depthSize.x, 1}, torch::kFloat32
+                    ).clone();
+
+                    // 3. Get pose from tracker (c2w = world to camera inverted)
+                    Matrix4f invM = pose->GetInvM();
+                    torch::Tensor poseTensor = torch::tensor({
+                        {invM.m00, invM.m10, invM.m20, invM.m30},
+                        {invM.m01, invM.m11, invM.m21, invM.m31},
+                        {invM.m02, invM.m12, invM.m22, invM.m32},
+                        {invM.m03, invM.m13, invM.m23, invM.m33}
+                    }, torch::kFloat32);
+
+                    // 4. Create Camera object
+                    float cam_fx = calib.intrinsics_d.projectionParamsSimple.fx;
+                    float cam_fy = calib.intrinsics_d.projectionParamsSimple.fy;
+                    float cam_cx = calib.intrinsics_d.projectionParamsSimple.px;
+                    float cam_cy = calib.intrinsics_d.projectionParamsSimple.py;
+
+                    // Format frame ID with leading zeros for getFrameID() to work
+                    std::ostringstream frameIdStream;
+                    frameIdStream << "frame" << std::setfill('0') << std::setw(6) << frameCount << ".jpg";
+                    std::string fakeImgPath = frameIdStream.str();
+
+                    Camera currCam(depthSize.x, depthSize.y, cam_fx, cam_fy, cam_cx, cam_cy, true, poseTensor, fakeImgPath);
+                    currCam.id = frameCount;
+                    currCam.image = imageTensor;
+                    currCam.depth = depthTensor;
+                    currCam.c2w_slam = poseTensor.clone();
+
+                    // 5. Set pipeline state
+                    pipeline.curr_cam = currCam;
+                    pipeline.curr_cam.toGPU();
+                    pipeline.curr_frame_id = frameCount;
+
+                    if (frameCount == 10) {
+                        std::cout << "  Debug - Camera image size: " << currCam.image.sizes() << "\n";
+                        std::cout << "  Debug - Camera depth size: " << currCam.depth.sizes() << "\n";
+                        std::cout << "  Debug - Camera dims: " << currCam.width << "x" << currCam.height << "\n";
+                    }
+
+                    // Update keyframe list with current pose
+                    pipeline.updateFrameList();
+
+                    // Use live raycast data (from renderState_live, computed during tracking)
+                    // This is more reliable than custom pose raycasting for online mode
+                    TensorDict raycast_data = pipeline.getLiveRaycast(pipeline.curr_cam);
+
+                    // Validate raycast data before using
+                    auto vertex_map = raycast_data["vertex_map"];
+                    auto color_map = raycast_data["color_map"];
+                    auto depth_map = raycast_data["depth_map"];
+
+                    float vertex_sum = vertex_map.abs().sum().item<float>();
+                    float color_mean = color_map.mean().item<float>();
+                    float depth_valid = (depth_map > 0.2f).sum().item<float>();
+
+                    // Debug output for first few optimization frames
+                    if (frameCount < TRACKING_INIT_FRAMES + 50) {
+                        std::cout << "  Live raycast - valid_pixels: " << depth_valid
+                                  << ", color_mean: " << std::fixed << std::setprecision(3) << color_mean << "\n";
+                    }
+
+                    // Skip if raycast returned invalid data (NaN or zero)
+                    if (std::isnan(vertex_sum) || depth_valid < 1000) {
+                        std::cout << "  Skipping - insufficient raycast data (valid_pixels: "
+                                  << depth_valid << ")\n";
+                        continue;
+                    }
+
+                    // For online mode, skip keyFrameRaycast (uses broken renderState_freeview)
+                    // Instead, just use the current live camera for optimization
+                    pipeline.opt_cam_list.clear();
+                    pipeline.opt_raycast_list.clear();
+                    pipeline.opt_cam_list.push_back(pipeline.curr_cam);
+                    pipeline.opt_raycast_list.push_back(raycast_data);
+
+                    // Initialize new Gaussians from TSDF raycast (CRITICAL for GS to work!)
+                    pipeline.initNewGaussians(gsModel, raycast_data);
+
+                    if (frameCount < TRACKING_INIT_FRAMES + 50) {
+                        std::cout << "  GS count after init: " << gsModel.getGaussianNum() << "\n";
+                    }
+
+                    // Only optimize if we have Gaussians
+                    if (gsModel.getGaussianNum() == 0) {
+                        std::cout << "  Skipping - no Gaussians initialized yet\n";
+                        continue;
+                    }
+
+                    // Optimize Gaussian parameters
+                    pipeline.localOptimize(gsModel);
+
+                    // Remove redundant Gaussians
+                    pipeline.removeRedundantGs(gsModel);
+
+                    if (frameCount % 100 == 0) {
+                        std::cout << "  Gaussians: " << gsModel.getGaussianNum() << "\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Gaussian optimization error: " << e.what() << "\n";
+                }
+            }
+        }
 
         // Live visualization
         if (showDisplay)
@@ -487,13 +879,18 @@ int main(int argc, char *argv[])
             }
             else if (key == 'c' || key == 'C')
             {
-                // Full reset - clear TSDF volume and tracking
-                std::cout << "\n*** Clearing volume and resetting ***\n";
+                // Full reset - clear TSDF volume, tracking, and Gaussians
+                std::cout << "\n*** Clearing volume, Gaussians and resetting ***\n";
                 auto* basicEngine = dynamic_cast<ITMBasicEngine<ITMVoxel, ITMVoxelIndex>*>(mainEngine);
                 if (basicEngine) {
                     basicEngine->resetAll();
-                    std::cout << "Volume cleared. Starting fresh scan.\n";
+                    std::cout << "Volume cleared.\n";
                 }
+                // Reset Gaussian model
+                gsModel.resetGaussians();
+                // Reset pipeline frame counter
+                pipeline.curr_frame_id = -1;
+                std::cout << "Starting fresh scan.\n";
             }
             // WASD + QE for free camera movement
             float cosYaw = cos(freeCamYaw), sinYaw = sin(freeCamYaw);
@@ -563,6 +960,14 @@ int main(int argc, char *argv[])
 
     // Cleanup
     std::cout << "\nShutting down...\n";
+
+    // Stop viewer server first
+    if (viewerServer) {
+        std::cout << "Stopping viewer server...\n";
+        viewerServer->stop();
+        viewerServer.reset();
+    }
+
     if (showDisplay)
     {
         cv::destroyAllWindows();

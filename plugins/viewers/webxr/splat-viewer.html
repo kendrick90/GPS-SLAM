@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spatial AI - Gaussian Splat VR Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+        #canvas { width: 100vw; height: 100vh; display: block; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 20px;
+            border-radius: 10px;
+            max-width: 350px;
+            z-index: 100;
+        }
+        #ui h1 { font-size: 18px; color: #4ecdc4; margin-bottom: 15px; }
+        #ui p { font-size: 13px; margin: 8px 0; opacity: 0.8; }
+        #ui input[type="file"] { margin: 10px 0; }
+        #ui input[type="text"] {
+            width: 100%; padding: 8px; margin: 5px 0;
+            border: none; border-radius: 4px;
+        }
+        #ui button {
+            padding: 10px 20px;
+            background: #4ecdc4;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            margin: 5px 5px 5px 0;
+        }
+        #ui button:hover { background: #3dbdb5; }
+        #ui button:disabled { background: #555; cursor: not-allowed; }
+        #stats { color: #f7d354; font-family: monospace; margin-top: 15px; }
+        #vr-section { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; }
+        #status {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            padding: 10px 25px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div id="ui">
+        <h1>3D Gaussian Splat Viewer</h1>
+
+        <p><strong>Load Splat File:</strong></p>
+        <input type="file" id="file-input" accept=".ply,.splat">
+        <p style="font-size: 11px; opacity: 0.6;">Supports .ply (3DGS format) and .splat files</p>
+
+        <p style="margin-top: 15px;"><strong>Or stream from SLAM:</strong></p>
+        <input type="text" id="ws-url" placeholder="ws://localhost:6689" value="ws://localhost:6689">
+        <button id="connect-btn">Connect</button>
+
+        <div id="stats">
+            <p>Splats: <span id="splat-count">0</span></p>
+            <p>FPS: <span id="fps">0</span></p>
+            <p>Render: <span id="render-time">0</span>ms</p>
+        </div>
+
+        <div id="vr-section">
+            <button id="vr-btn" disabled>Enter VR</button>
+            <p style="font-size: 11px; opacity: 0.6;" id="vr-status">Checking VR support...</p>
+        </div>
+    </div>
+
+    <div id="status">Use mouse to orbit, scroll to zoom</div>
+
+    <script type="module">
+    // ============================================================================
+    // Gaussian Splat WebXR Viewer
+    // Based on antimatter15/splat with WebXR additions
+    // ============================================================================
+
+    const canvas = document.getElementById('canvas');
+    const gl = canvas.getContext('webgl2', { xrCompatible: true });
+
+    if (!gl) {
+        alert('WebGL2 not supported');
+        throw new Error('WebGL2 not supported');
+    }
+
+    // State
+    let camera = {
+        position: [0, 1.5, 5],
+        target: [0, 0, 0],
+        up: [0, 1, 0],
+        fov: 60,
+    };
+
+    let splatData = null;
+    let splatCount = 0;
+    let viewMatrix = new Float32Array(16);
+    let projMatrix = new Float32Array(16);
+
+    // Mouse interaction
+    let isDragging = false;
+    let lastMouse = { x: 0, y: 0 };
+    let orbitAngles = { theta: 0, phi: Math.PI / 4 };
+    let orbitRadius = 5;
+
+    // WebXR
+    let xrSession = null;
+    let xrRefSpace = null;
+
+    // ============================================================================
+    // Shaders for Gaussian Splatting
+    // ============================================================================
+
+    const vertexShaderSource = `#version 300 es
+        precision highp float;
+
+        // Per-splat attributes
+        in vec3 a_position;
+        in vec3 a_scale;
+        in vec4 a_rotation;  // quaternion
+        in vec3 a_color;
+        in float a_opacity;
+
+        // Per-vertex (quad corners)
+        in vec2 a_corner;
+
+        uniform mat4 u_view;
+        uniform mat4 u_projection;
+        uniform vec2 u_viewport;
+        uniform vec3 u_camPos;
+
+        out vec3 v_color;
+        out float v_opacity;
+        out vec2 v_uv;
+
+        mat3 quatToMat3(vec4 q) {
+            float x = q.x, y = q.y, z = q.z, w = q.w;
+            return mat3(
+                1.0 - 2.0*(y*y + z*z), 2.0*(x*y + w*z), 2.0*(x*z - w*y),
+                2.0*(x*y - w*z), 1.0 - 2.0*(x*x + z*z), 2.0*(y*z + w*x),
+                2.0*(x*z + w*y), 2.0*(y*z - w*x), 1.0 - 2.0*(x*x + y*y)
+            );
+        }
+
+        void main() {
+            // Transform to view space
+            vec4 viewPos = u_view * vec4(a_position, 1.0);
+
+            // Compute 2D covariance in screen space (simplified)
+            mat3 R = quatToMat3(a_rotation);
+            mat3 S = mat3(
+                a_scale.x, 0.0, 0.0,
+                0.0, a_scale.y, 0.0,
+                0.0, 0.0, a_scale.z
+            );
+            mat3 M = R * S;
+
+            // Project covariance to 2D
+            float focal = u_viewport.y / (2.0 * tan(radians(30.0)));
+            float z = -viewPos.z;
+
+            // Splat size in pixels
+            vec2 splatSize = vec2(
+                length(M[0]) * focal / z,
+                length(M[1]) * focal / z
+            ) * 2.0;
+
+            // Clamp size
+            splatSize = clamp(splatSize, vec2(1.0), vec2(500.0));
+
+            // Offset corner
+            vec2 offset = a_corner * splatSize / u_viewport;
+
+            vec4 clipPos = u_projection * viewPos;
+            clipPos.xy += offset * clipPos.w;
+
+            gl_Position = clipPos;
+            v_color = a_color;
+            v_opacity = a_opacity;
+            v_uv = a_corner;
+        }
+    `;
+
+    const fragmentShaderSource = `#version 300 es
+        precision highp float;
+
+        in vec3 v_color;
+        in float v_opacity;
+        in vec2 v_uv;
+
+        out vec4 fragColor;
+
+        void main() {
+            // Gaussian falloff
+            float dist2 = dot(v_uv, v_uv);
+            float alpha = exp(-dist2 * 2.0) * v_opacity;
+
+            if (alpha < 0.01) discard;
+
+            fragColor = vec4(v_color, alpha);
+        }
+    `;
+
+    // ============================================================================
+    // WebGL Setup
+    // ============================================================================
+
+    function createShader(type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            console.error('Shader compile error:', gl.getShaderInfoLog(shader));
+            gl.deleteShader(shader);
+            return null;
+        }
+        return shader;
+    }
+
+    function createProgram(vsSource, fsSource) {
+        const vs = createShader(gl.VERTEX_SHADER, vsSource);
+        const fs = createShader(gl.FRAGMENT_SHADER, fsSource);
+        const program = gl.createProgram();
+        gl.attachShader(program, vs);
+        gl.attachShader(program, fs);
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            console.error('Program link error:', gl.getProgramInfoLog(program));
+            return null;
+        }
+        return program;
+    }
+
+    const program = createProgram(vertexShaderSource, fragmentShaderSource);
+
+    // Get locations
+    const attribs = {
+        position: gl.getAttribLocation(program, 'a_position'),
+        scale: gl.getAttribLocation(program, 'a_scale'),
+        rotation: gl.getAttribLocation(program, 'a_rotation'),
+        color: gl.getAttribLocation(program, 'a_color'),
+        opacity: gl.getAttribLocation(program, 'a_opacity'),
+        corner: gl.getAttribLocation(program, 'a_corner'),
+    };
+
+    const uniforms = {
+        view: gl.getUniformLocation(program, 'u_view'),
+        projection: gl.getUniformLocation(program, 'u_projection'),
+        viewport: gl.getUniformLocation(program, 'u_viewport'),
+        camPos: gl.getUniformLocation(program, 'u_camPos'),
+    };
+
+    // Quad corners for instanced rendering
+    const corners = new Float32Array([
+        -1, -1,  1, -1,  1, 1,
+        -1, -1,  1, 1,  -1, 1
+    ]);
+    const cornerBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, corners, gl.STATIC_DRAW);
+
+    // Splat data buffers
+    let positionBuffer = gl.createBuffer();
+    let scaleBuffer = gl.createBuffer();
+    let rotationBuffer = gl.createBuffer();
+    let colorBuffer = gl.createBuffer();
+    let opacityBuffer = gl.createBuffer();
+
+    // VAO
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+
+    // Corner attribute (per-vertex)
+    gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuffer);
+    gl.enableVertexAttribArray(attribs.corner);
+    gl.vertexAttribPointer(attribs.corner, 2, gl.FLOAT, false, 0, 0);
+
+    gl.bindVertexArray(null);
+
+    // ============================================================================
+    // Math utilities
+    // ============================================================================
+
+    function mat4Perspective(out, fovy, aspect, near, far) {
+        const f = 1.0 / Math.tan(fovy / 2);
+        out[0] = f / aspect; out[1] = 0; out[2] = 0; out[3] = 0;
+        out[4] = 0; out[5] = f; out[6] = 0; out[7] = 0;
+        out[8] = 0; out[9] = 0; out[10] = (far + near) / (near - far); out[11] = -1;
+        out[12] = 0; out[13] = 0; out[14] = (2 * far * near) / (near - far); out[15] = 0;
+        return out;
+    }
+
+    function mat4LookAt(out, eye, target, up) {
+        let z = [eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]];
+        let len = Math.sqrt(z[0]*z[0] + z[1]*z[1] + z[2]*z[2]);
+        z = [z[0]/len, z[1]/len, z[2]/len];
+
+        let x = [up[1]*z[2] - up[2]*z[1], up[2]*z[0] - up[0]*z[2], up[0]*z[1] - up[1]*z[0]];
+        len = Math.sqrt(x[0]*x[0] + x[1]*x[1] + x[2]*x[2]);
+        x = [x[0]/len, x[1]/len, x[2]/len];
+
+        let y = [z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0]];
+
+        out[0] = x[0]; out[1] = y[0]; out[2] = z[0]; out[3] = 0;
+        out[4] = x[1]; out[5] = y[1]; out[6] = z[1]; out[7] = 0;
+        out[8] = x[2]; out[9] = y[2]; out[10] = z[2]; out[11] = 0;
+        out[12] = -(x[0]*eye[0] + x[1]*eye[1] + x[2]*eye[2]);
+        out[13] = -(y[0]*eye[0] + y[1]*eye[1] + y[2]*eye[2]);
+        out[14] = -(z[0]*eye[0] + z[1]*eye[1] + z[2]*eye[2]);
+        out[15] = 1;
+        return out;
+    }
+
+    // ============================================================================
+    // PLY Parser for 3DGS
+    // ============================================================================
+
+    async function loadPLY(buffer) {
+        const text = new TextDecoder().decode(buffer.slice(0, 4096));
+        const headerEnd = text.indexOf('end_header') + 'end_header'.length + 1;
+
+        // Parse header
+        const header = text.slice(0, headerEnd);
+        const vertexMatch = header.match(/element vertex (\d+)/);
+        if (!vertexMatch) throw new Error('Invalid PLY');
+
+        const numVertices = parseInt(vertexMatch[1]);
+        console.log(`Loading ${numVertices} Gaussians...`);
+
+        // Find properties
+        const properties = [];
+        const propRegex = /property (\w+) (\w+)/g;
+        let match;
+        while ((match = propRegex.exec(header)) !== null) {
+            properties.push({ type: match[1], name: match[2] });
+        }
+
+        // Allocate arrays
+        const positions = new Float32Array(numVertices * 3);
+        const scales = new Float32Array(numVertices * 3);
+        const rotations = new Float32Array(numVertices * 4);
+        const colors = new Float32Array(numVertices * 3);
+        const opacities = new Float32Array(numVertices);
+
+        // Parse binary data
+        const isBinary = header.includes('binary_little_endian');
+
+        if (isBinary) {
+            const dataView = new DataView(buffer, headerEnd);
+            let offset = 0;
+
+            // Calculate stride
+            let stride = 0;
+            for (const prop of properties) {
+                stride += prop.type === 'float' ? 4 : (prop.type === 'uchar' ? 1 : 4);
+            }
+
+            for (let i = 0; i < numVertices; i++) {
+                let propOffset = 0;
+                const values = {};
+
+                for (const prop of properties) {
+                    if (prop.type === 'float') {
+                        values[prop.name] = dataView.getFloat32(offset + propOffset, true);
+                        propOffset += 4;
+                    } else if (prop.type === 'uchar') {
+                        values[prop.name] = dataView.getUint8(offset + propOffset);
+                        propOffset += 1;
+                    }
+                }
+
+                // Position
+                positions[i * 3] = values.x || 0;
+                positions[i * 3 + 1] = values.y || 0;
+                positions[i * 3 + 2] = values.z || 0;
+
+                // Scale (exp of log scale)
+                scales[i * 3] = Math.exp(values.scale_0 || 0);
+                scales[i * 3 + 1] = Math.exp(values.scale_1 || 0);
+                scales[i * 3 + 2] = Math.exp(values.scale_2 || 0);
+
+                // Rotation quaternion
+                rotations[i * 4] = values.rot_0 || 1;
+                rotations[i * 4 + 1] = values.rot_1 || 0;
+                rotations[i * 4 + 2] = values.rot_2 || 0;
+                rotations[i * 4 + 3] = values.rot_3 || 0;
+
+                // Color from SH DC (simplified)
+                const SH_C0 = 0.28209479177387814;
+                colors[i * 3] = Math.max(0, Math.min(1, 0.5 + SH_C0 * (values.f_dc_0 || 0)));
+                colors[i * 3 + 1] = Math.max(0, Math.min(1, 0.5 + SH_C0 * (values.f_dc_1 || 0)));
+                colors[i * 3 + 2] = Math.max(0, Math.min(1, 0.5 + SH_C0 * (values.f_dc_2 || 0)));
+
+                // Opacity (sigmoid)
+                const rawOpacity = values.opacity || 0;
+                opacities[i] = 1 / (1 + Math.exp(-rawOpacity));
+
+                offset += stride;
+            }
+        } else {
+            // ASCII parsing (slower)
+            const lines = new TextDecoder().decode(buffer).split('\n').slice(header.split('\n').length);
+            for (let i = 0; i < numVertices && i < lines.length; i++) {
+                const vals = lines[i].trim().split(/\s+/).map(parseFloat);
+                if (vals.length < 3) continue;
+
+                positions[i * 3] = vals[0];
+                positions[i * 3 + 1] = vals[1];
+                positions[i * 3 + 2] = vals[2];
+
+                // Default values for missing properties
+                scales[i * 3] = scales[i * 3 + 1] = scales[i * 3 + 2] = 0.01;
+                rotations[i * 4] = 1;
+                colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = 0.7;
+                opacities[i] = 0.8;
+            }
+        }
+
+        return { positions, scales, rotations, colors, opacities, count: numVertices };
+    }
+
+    // ============================================================================
+    // Upload splat data to GPU
+    // ============================================================================
+
+    function uploadSplatData(data) {
+        splatData = data;
+        splatCount = data.count;
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data.positions, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data.scales, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, rotationBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data.rotations, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data.colors, gl.STATIC_DRAW);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, opacityBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data.opacities, gl.STATIC_DRAW);
+
+        document.getElementById('splat-count').textContent = splatCount.toLocaleString();
+        console.log(`Uploaded ${splatCount} splats to GPU`);
+    }
+
+    // ============================================================================
+    // Rendering
+    // ============================================================================
+
+    function render(time, frame) {
+        const startTime = performance.now();
+
+        // Handle XR frame
+        let views = null;
+        if (frame) {
+            const pose = frame.getViewerPose(xrRefSpace);
+            if (pose) {
+                views = pose.views;
+            }
+        }
+
+        // Resize canvas
+        if (!frame) {
+            canvas.width = canvas.clientWidth * window.devicePixelRatio;
+            canvas.height = canvas.clientHeight * window.devicePixelRatio;
+        }
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0.05, 0.05, 0.1, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        if (splatCount === 0) {
+            if (!frame) requestAnimationFrame(render);
+            return;
+        }
+
+        gl.useProgram(program);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.disable(gl.DEPTH_TEST);
+
+        // Render for each view (1 for desktop, 2 for VR stereo)
+        const viewsToRender = views || [null];
+
+        for (let viewIdx = 0; viewIdx < viewsToRender.length; viewIdx++) {
+            const xrView = viewsToRender[viewIdx];
+
+            if (xrView) {
+                // XR stereo rendering
+                const viewport = frame.session.renderState.baseLayer.getViewport(xrView);
+                gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+
+                gl.uniformMatrix4fv(uniforms.view, false, xrView.transform.inverse.matrix);
+                gl.uniformMatrix4fv(uniforms.projection, false, xrView.projectionMatrix);
+                gl.uniform2f(uniforms.viewport, viewport.width, viewport.height);
+
+                const camPos = xrView.transform.position;
+                gl.uniform3f(uniforms.camPos, camPos.x, camPos.y, camPos.z);
+            } else {
+                // Desktop rendering
+                const aspect = canvas.width / canvas.height;
+                mat4Perspective(projMatrix, camera.fov * Math.PI / 180, aspect, 0.1, 1000);
+
+                // Orbit camera
+                const x = orbitRadius * Math.sin(orbitAngles.theta) * Math.cos(orbitAngles.phi);
+                const y = orbitRadius * Math.sin(orbitAngles.phi);
+                const z = orbitRadius * Math.cos(orbitAngles.theta) * Math.cos(orbitAngles.phi);
+                camera.position = [x, y + 1, z];
+
+                mat4LookAt(viewMatrix, camera.position, camera.target, camera.up);
+
+                gl.uniformMatrix4fv(uniforms.view, false, viewMatrix);
+                gl.uniformMatrix4fv(uniforms.projection, false, projMatrix);
+                gl.uniform2f(uniforms.viewport, canvas.width, canvas.height);
+                gl.uniform3fv(uniforms.camPos, camera.position);
+            }
+
+            // Setup instanced attributes
+            gl.bindVertexArray(vao);
+
+            // Position (instanced)
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(attribs.position);
+            gl.vertexAttribPointer(attribs.position, 3, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.position, 1);
+
+            // Scale (instanced)
+            gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuffer);
+            gl.enableVertexAttribArray(attribs.scale);
+            gl.vertexAttribPointer(attribs.scale, 3, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.scale, 1);
+
+            // Rotation (instanced)
+            gl.bindBuffer(gl.ARRAY_BUFFER, rotationBuffer);
+            gl.enableVertexAttribArray(attribs.rotation);
+            gl.vertexAttribPointer(attribs.rotation, 4, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.rotation, 1);
+
+            // Color (instanced)
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.enableVertexAttribArray(attribs.color);
+            gl.vertexAttribPointer(attribs.color, 3, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.color, 1);
+
+            // Opacity (instanced)
+            gl.bindBuffer(gl.ARRAY_BUFFER, opacityBuffer);
+            gl.enableVertexAttribArray(attribs.opacity);
+            gl.vertexAttribPointer(attribs.opacity, 1, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.opacity, 1);
+
+            // Corner (per-vertex)
+            gl.bindBuffer(gl.ARRAY_BUFFER, cornerBuffer);
+            gl.enableVertexAttribArray(attribs.corner);
+            gl.vertexAttribPointer(attribs.corner, 2, gl.FLOAT, false, 0, 0);
+            gl.vertexAttribDivisor(attribs.corner, 0);
+
+            // Draw instanced quads
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, splatCount);
+        }
+
+        // Stats
+        const renderTime = performance.now() - startTime;
+        document.getElementById('render-time').textContent = renderTime.toFixed(1);
+
+        if (!frame) {
+            requestAnimationFrame(render);
+        }
+    }
+
+    // ============================================================================
+    // Mouse Controls
+    // ============================================================================
+
+    canvas.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - lastMouse.x;
+        const dy = e.clientY - lastMouse.y;
+
+        orbitAngles.theta += dx * 0.01;
+        orbitAngles.phi = Math.max(0.1, Math.min(Math.PI - 0.1, orbitAngles.phi + dy * 0.01));
+
+        lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    canvas.addEventListener('mouseup', () => isDragging = false);
+    canvas.addEventListener('mouseleave', () => isDragging = false);
+
+    canvas.addEventListener('wheel', (e) => {
+        orbitRadius *= 1 + e.deltaY * 0.001;
+        orbitRadius = Math.max(0.5, Math.min(50, orbitRadius));
+        e.preventDefault();
+    }, { passive: false });
+
+    // ============================================================================
+    // File Loading
+    // ============================================================================
+
+    document.getElementById('file-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        document.getElementById('status').textContent = 'Loading...';
+
+        try {
+            const buffer = await file.arrayBuffer();
+            const data = await loadPLY(buffer);
+            uploadSplatData(data);
+            document.getElementById('status').textContent = `Loaded ${splatCount.toLocaleString()} Gaussians`;
+        } catch (err) {
+            console.error(err);
+            document.getElementById('status').textContent = 'Failed to load: ' + err.message;
+        }
+    });
+
+    // ============================================================================
+    // WebSocket Streaming
+    // ============================================================================
+
+    document.getElementById('connect-btn').addEventListener('click', () => {
+        const url = document.getElementById('ws-url').value;
+        document.getElementById('status').textContent = 'Connecting...';
+
+        const ws = new WebSocket(url);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            document.getElementById('status').textContent = 'Connected - waiting for data...';
+        };
+
+        ws.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                // Binary splat data
+                const view = new DataView(e.data);
+                const msgType = view.getUint32(0, true);
+                const count = view.getUint32(4, true);
+
+                if (msgType === 2) { // Gaussians
+                    // Parse streamed Gaussian data
+                    // Format: positions, scales, rotations, colors
+                    const floatView = new Float32Array(e.data, 8);
+
+                    const positions = floatView.slice(0, count * 3);
+                    const scales = floatView.slice(count * 3, count * 6);
+                    const rotations = floatView.slice(count * 6, count * 10);
+                    const colors = floatView.slice(count * 10, count * 13);
+                    const opacities = new Float32Array(count).fill(0.8);
+
+                    uploadSplatData({ positions, scales, rotations, colors, opacities, count });
+                    document.getElementById('status').textContent = `Streaming: ${count} Gaussians`;
+                }
+            }
+        };
+
+        ws.onerror = () => {
+            document.getElementById('status').textContent = 'Connection failed';
+        };
+    });
+
+    // ============================================================================
+    // WebXR Setup
+    // ============================================================================
+
+    async function initXR() {
+        if (!('xr' in navigator)) {
+            document.getElementById('vr-status').textContent = 'WebXR not supported';
+            return;
+        }
+
+        const supported = await navigator.xr.isSessionSupported('immersive-vr');
+        if (supported) {
+            document.getElementById('vr-btn').disabled = false;
+            document.getElementById('vr-status').textContent = 'VR available - click to enter';
+
+            document.getElementById('vr-btn').addEventListener('click', startXR);
+        } else {
+            document.getElementById('vr-status').textContent = 'VR not available on this device';
+        }
+    }
+
+    async function startXR() {
+        try {
+            xrSession = await navigator.xr.requestSession('immersive-vr', {
+                optionalFeatures: ['local-floor', 'bounded-floor']
+            });
+
+            xrSession.addEventListener('end', () => {
+                xrSession = null;
+                document.getElementById('vr-btn').textContent = 'Enter VR';
+            });
+
+            await gl.makeXRCompatible();
+
+            const layer = new XRWebGLLayer(xrSession, gl);
+            xrSession.updateRenderState({ baseLayer: layer });
+
+            xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+
+            document.getElementById('vr-btn').textContent = 'Exit VR';
+            document.getElementById('status').textContent = 'VR Active';
+
+            xrSession.requestAnimationFrame(xrRender);
+        } catch (err) {
+            console.error('Failed to start XR:', err);
+            document.getElementById('status').textContent = 'VR failed: ' + err.message;
+        }
+    }
+
+    function xrRender(time, frame) {
+        if (!xrSession) return;
+
+        xrSession.requestAnimationFrame(xrRender);
+
+        const layer = xrSession.renderState.baseLayer;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+
+        render(time, frame);
+    }
+
+    // ============================================================================
+    // FPS Counter
+    // ============================================================================
+
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+
+    setInterval(() => {
+        const now = performance.now();
+        const fps = frameCount / ((now - lastFpsTime) / 1000);
+        document.getElementById('fps').textContent = fps.toFixed(0);
+        frameCount = 0;
+        lastFpsTime = now;
+    }, 1000);
+
+    // ============================================================================
+    // Initialize
+    // ============================================================================
+
+    initXR();
+    requestAnimationFrame(function loop(t) {
+        frameCount++;
+        render(t);
+    });
+
+    // URL parameter for auto-loading
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('ply')) {
+        fetch(params.get('ply'))
+            .then(r => r.arrayBuffer())
+            .then(loadPLY)
+            .then(uploadSplatData)
+            .catch(console.error);
+    }
+    </script>
+</body>
+</html>

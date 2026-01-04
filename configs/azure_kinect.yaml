@@ -1,6 +1,7 @@
 workspace_dir: output_online
 dev_id: 0
 work_mode: online
+viewer_port: 6688  # TCP port for SIBR GS viewer (0 = disabled)
 
 # Azure Kinect sensor settings are passed via command line
 # This config enables Gaussian splatting for online SLAM
@@ -32,7 +33,7 @@ PIPE:
 
   # Online SLAM settings
   log_slam_state: false
-  new_gs_sample_ratio: 0.25
+  new_gs_sample_ratio: 0.1
   color_error_thres: 0.05
   localframe_cam_window_length: 2
   localframe_cam_window_interval: 5
@@ -49,9 +50,9 @@ PIPE:
     sample_method: random
 
   remove_configs:
-    large_scale_thres: 0.1
-    small_scale_thres: 0.003
-    low_opac_thres: 0.005
+    large_scale_thres: 0.08
+    small_scale_thres: 0.005
+    low_opac_thres: 0.02
 
   TSDF:
     voxel_size: 0.005

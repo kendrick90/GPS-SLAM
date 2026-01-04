@@ -16,6 +16,7 @@ option(SAP_BUILD_LEGACY "Build legacy GPS-SLAM executables" ON)
 option(SAP_BUILD_TESTS "Build tests" OFF)
 option(SAP_WITH_RERUN "Enable Rerun.io visualization" ON)
 option(SAP_WITH_QUEST3 "Enable Meta Quest 3 support" OFF)
+option(SAP_WITH_WEBXR "Enable WebXR streaming viewer" ON)
 
 # Prevent Windows.h from defining min/max macros
 if(WIN32)
@@ -295,12 +296,44 @@ if(SAP_WITH_QUEST3)
     endif()
 endif()
 
-# Boost (for remote_viewer networking)
+# Boost (for remote_viewer networking and WebXR streaming)
 find_package(Boost COMPONENTS system QUIET)
 if(Boost_FOUND)
     message(STATUS "Found Boost: ${Boost_VERSION}")
+    set(SAP_HAS_BOOST_BEAST ON)
 else()
-    message(STATUS "Boost not found - remote_viewer will not be built")
+    message(STATUS "Boost not found - remote_viewer and WebXR streaming will not be built")
+    set(SAP_HAS_BOOST_BEAST OFF)
+endif()
+
+# ============================================================================
+# WebXR Streaming Viewer (requires Boost.Beast)
+# ============================================================================
+if(SAP_WITH_WEBXR)
+    if(SAP_HAS_BOOST_BEAST)
+        message(STATUS "WebXR streaming viewer enabled")
+        set(WEBXR_SOURCES
+            ${PROJECT_SOURCE_DIR}/plugins/viewers/webxr_stream_server.cpp
+        )
+        add_library(sap_webxr_stream STATIC ${WEBXR_SOURCES})
+        target_include_directories(sap_webxr_stream PUBLIC
+            ${PROJECT_SOURCE_DIR}
+            ${PROJECT_SOURCE_DIR}/plugins
+            ${Boost_INCLUDE_DIRS}
+        )
+        target_link_libraries(sap_webxr_stream PUBLIC
+            ${TORCH_LIBRARIES}
+            Boost::system
+        )
+        target_compile_definitions(sap_webxr_stream PUBLIC SAP_WITH_BOOST_BEAST)
+
+        # Copy WebXR viewer files to build output
+        file(COPY ${PROJECT_SOURCE_DIR}/plugins/viewers/webxr/
+             DESTINATION ${CMAKE_BINARY_DIR}/webxr)
+    else()
+        message(WARNING "WebXR streaming disabled - requires Boost")
+        set(SAP_WITH_WEBXR OFF)
+    endif()
 endif()
 
 # NVML (nvidia-ml) - platform specific

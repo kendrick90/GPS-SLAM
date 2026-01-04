@@ -19,6 +19,24 @@ public:
         opt_gs_params.toGPU();
     }
 
+    // Reset/clear all Gaussians
+    void resetGaussians()
+    {
+        // Create minimal point cloud with single point at origin
+        torch::Tensor xyz = torch::zeros({1, 3}, torch::kFloat32);
+        torch::Tensor rgb = torch::zeros({1, 3}, torch::kFloat32);
+        torch::Tensor normal = torch::tensor({{0.0f, 0.0f, 1.0f}}, torch::kFloat32);
+        opt_gs_params.init(xyz, rgb, normal, maxSH, defaultOpacities, maxInitScale, minInitScale, 0);
+        opt_gs_params.toGPU();
+        // Reset densify tracking
+        grad_2d = torch::Tensor();
+        visible_count = torch::Tensor();
+        max2DSize = torch::Tensor();
+        // Reinitialize optimizers
+        initOptimizers(-1, 1.0f);
+        std::cout << "Gaussians reset. Count: " << getGaussianNum() << std::endl;
+    }
+
     // 读取配置文件设置参数
     void loadConfig(const YAML::Node &config);
 

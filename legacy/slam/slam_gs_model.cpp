@@ -1,5 +1,6 @@
 #include "slam_gs_model.h"
 #include "platform_time.h"
+#include <cuda_runtime.h>
 
 #define LOG_MODEL_TIME
 
@@ -9,6 +10,24 @@ void SLAMGaussianModel::addGaussians(const Camera &cam,
                                      float new_gs_sample_ratio,
                                      int frame_num)
 {
+    // VRAM management: check available GPU memory
+    size_t free_memory = 0, total_memory = 0;
+    cudaMemGetInfo(&free_memory, &total_memory);
+    const size_t MIN_FREE_VRAM = 512 * 1024 * 1024;  // Keep 512MB free
+    const int MAX_GAUSSIANS = 500000;
+
+    int currentCount = getGaussianNum();
+    if (currentCount >= MAX_GAUSSIANS || free_memory < MIN_FREE_VRAM) {
+        if (free_memory < MIN_FREE_VRAM) {
+            static bool warned = false;
+            if (!warned) {
+                std::cout << "VRAM low (" << free_memory / (1024*1024) << "MB free), stopping Gaussian growth at " << currentCount << std::endl;
+                warned = true;
+            }
+        }
+        return;  // Skip adding if at limit or low VRAM
+    }
+
 #ifdef LOG_MODEL_TIME
     struct timespec pixel_sample_start, pixel_sample_end, params_compute_end;
     clock_gettime(CLOCK_MONOTONIC, &pixel_sample_start);
@@ -24,6 +43,12 @@ void SLAMGaussianModel::addGaussians(const Camera &cam,
     // 生成随机排列的索引
     auto valid_indices = torch::randperm(valid_vertices.size(0), valid_vertices.options().dtype(torch::kLong));
     int num_select = static_cast<int>(valid_vertices.size(0) * new_gs_sample_ratio);
+
+    // Limit to not exceed max
+    int room = MAX_GAUSSIANS - currentCount;
+    if (num_select > room) {
+        num_select = room;
+    }
     if (num_select > 0)
     {
         // 选择前num_select个索引

@@ -24,3 +24,4 @@ venv/
 /viewer
 nul
 /.claude
+/vcpkg_installed

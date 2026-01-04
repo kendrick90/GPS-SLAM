@@ -61,7 +61,8 @@ void sendImage(boost::asio::ip::tcp::socket &sock, const cv::Mat &img)
 
 void sendTensor(boost::asio::ip::tcp::socket &sock, const torch::Tensor &tensor)
 {
-    torch::Tensor contiguous_tensor = tensor.contiguous();
+    // Must move to CPU before getting data pointer for socket write
+    torch::Tensor contiguous_tensor = tensor.cpu().contiguous();
     float *data_ptr = contiguous_tensor.data_ptr<float>();
     uint32_t num_bytes = contiguous_tensor.numel() * sizeof(float);
     boost::asio::write(sock, boost::asio::buffer(data_ptr, num_bytes));

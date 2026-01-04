@@ -1,10 +1,12 @@
 // Copyright 2014-2017 Oxford University Innovation Limited and the authors of InfiniTAM
 
+#define _USE_MATH_DEFINES
+#include <cmath>
+
 #include "ITMLibSettings.h"
 using namespace ITMLib;
 
 #include <climits>
-#include <cmath>
 
 ITMLibSettings::ITMLibSettings(void)
 :	sceneParams(0.02f, 100, 0.005f, 0.2f, 3.0f, false),

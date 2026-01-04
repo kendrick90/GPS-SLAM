@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spatial AI Playground - WebXR SLAM Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            overflow: hidden;
+        }
+        #container { width: 100vw; height: 100vh; }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 15px 20px;
+            background: rgba(0,0,0,0.7);
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 100;
+            max-width: 300px;
+        }
+        #info h1 { font-size: 16px; margin-bottom: 10px; color: #4ecdc4; }
+        #info p { margin: 5px 0; opacity: 0.8; }
+        #stats { color: #f7d354; }
+        #vr-button {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 15px 40px;
+            font-size: 18px;
+            background: #4ecdc4;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            z-index: 100;
+            transition: all 0.3s;
+        }
+        #vr-button:hover { background: #45b7aa; transform: translateX(-50%) scale(1.05); }
+        #vr-button:disabled { background: #555; cursor: not-allowed; }
+        #status-msg {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 10px 20px;
+            background: rgba(0,0,0,0.7);
+            border-radius: 6px;
+            font-size: 14px;
+            z-index: 100;
+        }
+        #connect-panel {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            padding: 30px;
+            border-radius: 12px;
+            z-index: 200;
+            text-align: center;
+        }
+        #connect-panel input {
+            padding: 12px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 6px;
+            margin: 10px 0;
+            width: 250px;
+        }
+        #connect-panel button {
+            padding: 12px 30px;
+            font-size: 16px;
+            background: #4ecdc4;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="connect-panel">
+        <h2>Spatial AI Playground</h2>
+        <p style="margin: 15px 0; opacity: 0.7;">Connect to SLAM streaming server</p>
+        <input type="text" id="server-url" placeholder="ws://192.168.1.100:6689" value="ws://localhost:6689">
+        <br>
+        <button id="connect-btn">Connect</button>
+    </div>
+
+    <div id="info" class="hidden">
+        <h1>SLAM Viewer</h1>
+        <p>Points: <span id="point-count">0</span></p>
+        <p>Gaussians: <span id="gaussian-count">0</span></p>
+        <p>Frames: <span id="frame-count">0</span></p>
+        <p id="stats">FPS: <span id="fps">0</span></p>
+        <p style="margin-top: 10px; font-size: 12px; opacity: 0.6;">
+            Controllers: Grip to grab/scale, Trigger to teleport
+        </p>
+    </div>
+
+    <div id="status-msg" class="hidden">Connecting...</div>
+    <button id="vr-button" class="hidden">Enter VR</button>
+
+    <!-- Three.js and WebXR -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ============================================================================
+        // WebXR SLAM Viewer
+        // ============================================================================
+
+        class SLAMViewer {
+            constructor() {
+                this.scene = null;
+                this.camera = null;
+                this.renderer = null;
+                this.controls = null;
+                this.ws = null;
+
+                // Scene objects
+                this.pointCloud = null;
+                this.gaussianSplats = null;
+                this.trajectory = null;
+                this.cameraFrustums = [];
+                this.hands = { left: null, right: null };
+
+                // VR controllers
+                this.controller1 = null;
+                this.controller2 = null;
+                this.controllerGrip1 = null;
+                this.controllerGrip2 = null;
+
+                // Interaction state
+                this.worldGroup = null;  // Parent for all SLAM content (for grab/scale)
+                this.grabbing = false;
+                this.initialGrabDistance = 0;
+                this.initialScale = 1;
+
+                // Stats
+                this.frameCount = 0;
+                this.lastTime = performance.now();
+                this.fps = 0;
+
+                this.init();
+            }
+
+            init() {
+                // Scene
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x1a1a2e);
+
+                // World group (container for all SLAM content)
+                this.worldGroup = new THREE.Group();
+                this.scene.add(this.worldGroup);
+
+                // Camera
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.01, 1000);
+                this.camera.position.set(0, 1.6, 3);
+
+                // Renderer with WebXR
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setPixelRatio(window.devicePixelRatio);
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.xr.enabled = true;
+                document.getElementById('container').appendChild(this.renderer.domElement);
+
+                // Orbit controls for non-VR
+                this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+                this.controls.target.set(0, 1, 0);
+                this.controls.update();
+
+                // Lighting
+                const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+                this.scene.add(ambient);
+                const directional = new THREE.DirectionalLight(0xffffff, 0.8);
+                directional.position.set(5, 10, 5);
+                this.scene.add(directional);
+
+                // Grid helper
+                const grid = new THREE.GridHelper(20, 20, 0x444444, 0x333333);
+                this.scene.add(grid);
+
+                // Coordinate axes
+                const axes = new THREE.AxesHelper(1);
+                this.worldGroup.add(axes);
+
+                // Initialize empty point cloud
+                this.initPointCloud();
+
+                // Initialize trajectory line
+                this.initTrajectory();
+
+                // Setup VR controllers
+                this.setupVRControllers();
+
+                // Window resize
+                window.addEventListener('resize', () => this.onResize());
+
+                // Animation loop
+                this.renderer.setAnimationLoop(() => this.animate());
+            }
+
+            initPointCloud() {
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
+
+                const material = new THREE.PointsMaterial({
+                    size: 0.01,
+                    vertexColors: true,
+                    sizeAttenuation: true
+                });
+
+                this.pointCloud = new THREE.Points(geometry, material);
+                this.worldGroup.add(this.pointCloud);
+            }
+
+            initTrajectory() {
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+
+                const material = new THREE.LineBasicMaterial({ color: 0x4ecdc4, linewidth: 2 });
+                this.trajectory = new THREE.Line(geometry, material);
+                this.worldGroup.add(this.trajectory);
+            }
+
+            setupVRControllers() {
+                const controllerModelFactory = new XRControllerModelFactory();
+
+                // Controller 1
+                this.controller1 = this.renderer.xr.getController(0);
+                this.controller1.addEventListener('selectstart', () => this.onSelectStart(0));
+                this.controller1.addEventListener('selectend', () => this.onSelectEnd(0));
+                this.controller1.addEventListener('squeezestart', () => this.onSqueezeStart(0));
+                this.controller1.addEventListener('squeezeend', () => this.onSqueezeEnd(0));
+                this.scene.add(this.controller1);
+
+                this.controllerGrip1 = this.renderer.xr.getControllerGrip(0);
+                this.controllerGrip1.add(controllerModelFactory.createControllerModel(this.controllerGrip1));
+                this.scene.add(this.controllerGrip1);
+
+                // Controller 2
+                this.controller2 = this.renderer.xr.getController(1);
+                this.controller2.addEventListener('selectstart', () => this.onSelectStart(1));
+                this.controller2.addEventListener('selectend', () => this.onSelectEnd(1));
+                this.controller2.addEventListener('squeezestart', () => this.onSqueezeStart(1));
+                this.controller2.addEventListener('squeezeend', () => this.onSqueezeEnd(1));
+                this.scene.add(this.controller2);
+
+                this.controllerGrip2 = this.renderer.xr.getControllerGrip(1);
+                this.controllerGrip2.add(controllerModelFactory.createControllerModel(this.controllerGrip2));
+                this.scene.add(this.controllerGrip2);
+
+                // Controller ray visualization
+                const rayGeometry = new THREE.BufferGeometry().setFromPoints([
+                    new THREE.Vector3(0, 0, 0),
+                    new THREE.Vector3(0, 0, -5)
+                ]);
+                const rayMaterial = new THREE.LineBasicMaterial({ color: 0x4ecdc4, transparent: true, opacity: 0.5 });
+
+                const ray1 = new THREE.Line(rayGeometry, rayMaterial);
+                this.controller1.add(ray1);
+
+                const ray2 = new THREE.Line(rayGeometry.clone(), rayMaterial.clone());
+                this.controller2.add(ray2);
+            }
+
+            onSelectStart(controllerId) {
+                // Trigger pressed - teleport
+                const controller = controllerId === 0 ? this.controller1 : this.controller2;
+                const raycaster = new THREE.Raycaster();
+                const tempMatrix = new THREE.Matrix4();
+
+                tempMatrix.identity().extractRotation(controller.matrixWorld);
+                raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+                raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+
+                // Find intersection with ground plane
+                const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+                const target = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, target);
+
+                if (target) {
+                    // Move user to target position
+                    const cameraWorldPos = new THREE.Vector3();
+                    this.camera.getWorldPosition(cameraWorldPos);
+                    const offset = target.clone().sub(cameraWorldPos);
+                    offset.y = 0;
+
+                    // In VR, we move the camera rig
+                    const xr = this.renderer.xr;
+                    const baseReferenceSpace = xr.getReferenceSpace();
+                    // Note: Full teleportation requires reference space manipulation
+                }
+            }
+
+            onSelectEnd(controllerId) {
+                // Trigger released
+            }
+
+            onSqueezeStart(controllerId) {
+                // Grip pressed - start grabbing world
+                this.grabbing = true;
+
+                if (this.controller1 && this.controller2) {
+                    const pos1 = new THREE.Vector3();
+                    const pos2 = new THREE.Vector3();
+                    this.controller1.getWorldPosition(pos1);
+                    this.controller2.getWorldPosition(pos2);
+                    this.initialGrabDistance = pos1.distanceTo(pos2);
+                    this.initialScale = this.worldGroup.scale.x;
+                }
+            }
+
+            onSqueezeEnd(controllerId) {
+                // Grip released
+                this.grabbing = false;
+            }
+
+            connect(url) {
+                if (this.ws) {
+                    this.ws.close();
+                }
+
+                const statusMsg = document.getElementById('status-msg');
+                statusMsg.textContent = 'Connecting...';
+                statusMsg.classList.remove('hidden');
+
+                console.log('Connecting to:', url);
+                this.ws = new WebSocket(url);
+                this.ws.binaryType = 'arraybuffer';
+
+                this.ws.onopen = () => {
+                    console.log('Connected to SLAM server');
+                    document.getElementById('connect-panel').classList.add('hidden');
+                    document.getElementById('info').classList.remove('hidden');
+                    statusMsg.textContent = 'Connected! Use mouse to orbit, scroll to zoom.';
+                    statusMsg.style.color = '#4ecdc4';
+
+                    // Check WebXR support and add VR button
+                    if ('xr' in navigator) {
+                        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                            if (supported) {
+                                const vrButton = VRButton.createButton(this.renderer);
+                                document.getElementById('vr-button').replaceWith(vrButton);
+                                statusMsg.textContent = 'Connected! Click Enter VR for immersive mode.';
+                            } else {
+                                statusMsg.textContent = 'Connected! VR not available - use mouse to explore.';
+                            }
+                        });
+                    } else {
+                        statusMsg.textContent = 'Connected! WebXR not supported - use mouse to explore.';
+                    }
+                };
+
+                this.ws.onmessage = (event) => {
+                    this.handleMessage(event.data);
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    statusMsg.textContent = 'Connection failed! Check server URL.';
+                    statusMsg.style.color = '#ff6b6b';
+                };
+
+                this.ws.onclose = () => {
+                    console.log('Disconnected from server');
+                };
+            }
+
+            handleMessage(data) {
+                // Handle binary or JSON messages
+                if (data instanceof ArrayBuffer) {
+                    this.handleBinaryMessage(data);
+                } else {
+                    const msg = JSON.parse(data);
+                    this.handleJSONMessage(msg);
+                }
+            }
+
+            handleBinaryMessage(buffer) {
+                // Binary protocol:
+                // [4 bytes: message type] [4 bytes: count] [data...]
+                const view = new DataView(buffer);
+                const msgType = view.getUint32(0, true);
+                const count = view.getUint32(4, true);
+
+                switch (msgType) {
+                    case 1: // Point cloud
+                        this.updatePointCloud(buffer, count);
+                        break;
+                    case 2: // Gaussians
+                        this.updateGaussians(buffer, count);
+                        break;
+                    case 3: // Trajectory
+                        this.updateTrajectoryFromBinary(buffer, count);
+                        break;
+                }
+            }
+
+            handleJSONMessage(msg) {
+                switch (msg.type) {
+                    case 'frame':
+                        this.frameCount++;
+                        document.getElementById('frame-count').textContent = this.frameCount;
+                        break;
+
+                    case 'pose':
+                        this.addCameraPose(msg.pose);
+                        break;
+
+                    case 'points':
+                        this.updatePointCloudFromJSON(msg.points, msg.colors);
+                        break;
+
+                    case 'trajectory':
+                        this.updateTrajectoryFromJSON(msg.poses);
+                        break;
+
+                    case 'hands':
+                        this.updateHands(msg.left, msg.right);
+                        break;
+
+                    case 'clear':
+                        this.clearScene();
+                        break;
+                }
+            }
+
+            updatePointCloud(buffer, count) {
+                // Binary format: [header 8 bytes] [positions: count*3*4 bytes] [colors: count*3*4 bytes]
+                const positions = new Float32Array(buffer, 8, count * 3);
+                const colors = new Float32Array(buffer, 8 + count * 12, count * 3);
+
+                const geometry = this.pointCloud.geometry;
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.computeBoundingSphere();
+
+                document.getElementById('point-count').textContent = count.toLocaleString();
+            }
+
+            updatePointCloudFromJSON(points, colors) {
+                const positions = new Float32Array(points.flat());
+                const colorData = colors ? new Float32Array(colors.flat()) :
+                    new Float32Array(points.length * 3).fill(0.7);
+
+                const geometry = this.pointCloud.geometry;
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colorData, 3));
+                geometry.computeBoundingSphere();
+
+                document.getElementById('point-count').textContent = points.length.toLocaleString();
+            }
+
+            updateGaussians(buffer, count) {
+                // TODO: Implement Gaussian splatting renderer
+                // For now, render as larger points
+                document.getElementById('gaussian-count').textContent = count.toLocaleString();
+            }
+
+            updateTrajectoryFromJSON(poses) {
+                const positions = [];
+                for (const pose of poses) {
+                    // Extract translation from 4x4 matrix
+                    positions.push(pose[3], pose[7], pose[11]);
+                }
+
+                const geometry = this.trajectory.geometry;
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            }
+
+            updateTrajectoryFromBinary(buffer, count) {
+                // Binary format: [header 8 bytes] [positions: count*3*4 bytes]
+                const positions = new Float32Array(buffer, 8, count * 3);
+
+                const geometry = this.trajectory.geometry;
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            }
+
+            addCameraPose(poseMatrix) {
+                // Add camera frustum at pose
+                const frustum = this.createCameraFrustum();
+
+                const matrix = new THREE.Matrix4();
+                matrix.fromArray(poseMatrix);
+                frustum.applyMatrix4(matrix);
+
+                this.worldGroup.add(frustum);
+                this.cameraFrustums.push(frustum);
+
+                // Limit number of frustums
+                if (this.cameraFrustums.length > 100) {
+                    const old = this.cameraFrustums.shift();
+                    this.worldGroup.remove(old);
+                }
+            }
+
+            createCameraFrustum(scale = 0.05) {
+                const group = new THREE.Group();
+
+                // Frustum lines
+                const vertices = [
+                    0, 0, 0,
+                    -scale, -scale * 0.75, scale * 1.5,
+                    scale, -scale * 0.75, scale * 1.5,
+                    scale, scale * 0.75, scale * 1.5,
+                    -scale, scale * 0.75, scale * 1.5,
+                ];
+
+                const indices = [
+                    0, 1, 0, 2, 0, 3, 0, 4,
+                    1, 2, 2, 3, 3, 4, 4, 1
+                ];
+
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                geometry.setIndex(indices);
+
+                const material = new THREE.LineBasicMaterial({ color: 0xf7d354, opacity: 0.5, transparent: true });
+                const lines = new THREE.LineSegments(geometry, material);
+                group.add(lines);
+
+                return group;
+            }
+
+            updateHands(leftData, rightData) {
+                // Update hand skeleton visualization
+                // TODO: Implement hand bone rendering
+            }
+
+            clearScene() {
+                // Clear point cloud
+                const pcGeometry = this.pointCloud.geometry;
+                pcGeometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+                pcGeometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
+
+                // Clear trajectory
+                const trajGeometry = this.trajectory.geometry;
+                trajGeometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+
+                // Clear frustums
+                for (const frustum of this.cameraFrustums) {
+                    this.worldGroup.remove(frustum);
+                }
+                this.cameraFrustums = [];
+
+                // Reset stats
+                this.frameCount = 0;
+                document.getElementById('point-count').textContent = '0';
+                document.getElementById('gaussian-count').textContent = '0';
+                document.getElementById('frame-count').textContent = '0';
+            }
+
+            onResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+
+            animate() {
+                // Update FPS
+                const now = performance.now();
+                if (now - this.lastTime > 1000) {
+                    this.fps = Math.round(this.frameCount / ((now - this.lastTime) / 1000));
+                    document.getElementById('fps').textContent = this.fps;
+                    this.lastTime = now;
+                    this.frameCount = 0;
+                }
+
+                // Handle grab/scale interaction in VR
+                if (this.grabbing && this.renderer.xr.isPresenting) {
+                    const pos1 = new THREE.Vector3();
+                    const pos2 = new THREE.Vector3();
+                    this.controller1.getWorldPosition(pos1);
+                    this.controller2.getWorldPosition(pos2);
+                    const currentDistance = pos1.distanceTo(pos2);
+
+                    if (this.initialGrabDistance > 0.01) {
+                        const scale = this.initialScale * (currentDistance / this.initialGrabDistance);
+                        this.worldGroup.scale.setScalar(Math.max(0.1, Math.min(10, scale)));
+                    }
+                }
+
+                // Update controls if not in VR
+                if (!this.renderer.xr.isPresenting) {
+                    this.controls.update();
+                }
+
+                this.renderer.render(this.scene, this.camera);
+            }
+        }
+
+        // ============================================================================
+        // Initialize
+        // ============================================================================
+
+        const viewer = new SLAMViewer();
+
+        // Connect button
+        document.getElementById('connect-btn').addEventListener('click', () => {
+            const url = document.getElementById('server-url').value;
+            viewer.connect(url);
+        });
+
+        // Enter key to connect
+        document.getElementById('server-url').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const url = document.getElementById('server-url').value;
+                viewer.connect(url);
+            }
+        });
+
+        // Demo mode - connect with URL params
+        const params = new URLSearchParams(window.location.search);
+        if (params.has('server')) {
+            viewer.connect(params.get('server'));
+        }
+    </script>
+</body>
+</html>

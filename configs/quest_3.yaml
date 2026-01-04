@@ -158,3 +158,29 @@ RERUN:
   time_name: "frame"
   use_wall_clock: false
   log_level: standard
+
+# ============================================================================
+# WebXR Streaming Viewer Settings
+# Stream SLAM data to Quest 3 browser for VR visualization
+# ============================================================================
+WEBXR:
+  enabled: true
+  port: 6689
+  bind_address: "0.0.0.0"
+
+  # Data streaming options
+  stream_point_cloud: true
+  stream_gaussians: true
+  stream_trajectory: true
+  stream_poses: true
+  stream_hands: true
+
+  # Performance
+  point_cloud_stride: 4
+  max_points: 500000
+  trajectory_max_points: 1000
+  update_rate_hz: 30
+
+  # Protocol
+  use_binary_protocol: true
+  serve_static_files: true

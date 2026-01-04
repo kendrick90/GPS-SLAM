@@ -51,6 +51,9 @@ public:
     // 输入任意dataset内的相机，使用main engine里预先存好的cam pose进行raycast，返回深度图和颜色图
     TensorDict runRaycastByCam(const Camera &cam, bool use_cam_depth = true);
 
+    // Get live raycast data from current tracking pose (for online mode)
+    TensorDict getLiveRaycast(const Camera &cam);
+
     void renderEvalImgs(SLAMGaussianModel &model, const std::vector<Camera> &cams, std::vector<std::string> names);
 
     void keyFrameRaycast(SLAMGaussianModel &model);

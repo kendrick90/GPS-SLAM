@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gaussian Splat VR Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            color: #fff;
+            font-family: system-ui, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #container { width: 100vw; height: 100vh; }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.85);
+            padding: 15px;
+            border-radius: 10px;
+            max-width: 320px;
+            z-index: 100;
+            font-size: 14px;
+        }
+        #ui h1 { font-size: 16px; color: #4ecdc4; margin-bottom: 10px; }
+        #ui p { margin: 6px 0; opacity: 0.8; font-size: 13px; }
+        #ui input[type="file"], #ui input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #333;
+            border-radius: 5px;
+            background: #222;
+            color: #fff;
+        }
+        #ui button {
+            padding: 10px 15px;
+            background: #4ecdc4;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            margin: 5px 5px 5px 0;
+        }
+        #ui button:disabled { background: #444; color: #888; }
+        #stats {
+            font-family: monospace;
+            font-size: 12px;
+            color: #f7d354;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+        }
+        #vr-controls {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+        }
+        #status {
+            position: absolute;
+            bottom: 15px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 13px;
+            text-align: center;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 200;
+        }
+        #loading.hidden { display: none; }
+        .progress-bar {
+            width: 200px;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            margin-top: 10px;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background: #4ecdc4;
+            border-radius: 2px;
+            width: 0%;
+            transition: width 0.2s;
+        }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+
+    <div id="loading" class="hidden">
+        <p>Loading Gaussians...</p>
+        <div class="progress-bar"><div class="progress-bar-fill" id="progress"></div></div>
+        <p id="load-status" style="margin-top: 10px; font-size: 12px; opacity: 0.7;"></p>
+    </div>
+
+    <div id="ui">
+        <h1>3DGS Viewer</h1>
+
+        <p><strong>Load .ply file:</strong></p>
+        <input type="file" id="file-input" accept=".ply,.splat">
+
+        <p style="margin-top: 12px;"><strong>Or enter URL:</strong></p>
+        <input type="text" id="url-input" placeholder="https://example.com/model.ply">
+        <button id="load-url-btn">Load URL</button>
+
+        <div id="stats">
+            <p>Splats: <span id="splat-count">0</span></p>
+            <p>FPS: <span id="fps">0</span></p>
+        </div>
+
+        <div id="vr-controls">
+            <button id="vr-btn" disabled>Enter VR</button>
+            <button id="ar-btn" disabled>Enter AR</button>
+            <p id="xr-status" style="font-size: 11px; margin-top: 5px;">Checking XR...</p>
+        </div>
+    </div>
+
+    <div id="status">Drag to orbit · Scroll to zoom · Drop .ply file</div>
+
+    <!-- Three.js -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+    import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+
+    // ============================================================================
+    // Scene Setup
+    // ============================================================================
+
+    const container = document.getElementById('container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a2e);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 1000);
+    camera.position.set(0, 1.5, 4);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    // Controls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(5, 10, 5);
+    scene.add(dirLight);
+
+    // Grid
+    const grid = new THREE.GridHelper(10, 10, 0x444444, 0x333333);
+    scene.add(grid);
+
+    // Axes
+    scene.add(new THREE.AxesHelper(1));
+
+    // Splat container
+    let splatMesh = null;
+    let splatCount = 0;
+
+    // ============================================================================
+    // Gaussian Splat Material (Point-based approximation)
+    // ============================================================================
+    // Note: True 3DGS requires custom shaders with tile-based rasterization
+    // This uses large points as a simpler approximation for viewing
+
+    const splatVertexShader = `
+        attribute float size;
+        attribute vec3 customColor;
+        attribute float opacity;
+
+        varying vec3 vColor;
+        varying float vOpacity;
+
+        void main() {
+            vColor = customColor;
+            vOpacity = opacity;
+
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+
+            // Size attenuation
+            gl_PointSize = size * (300.0 / -mvPosition.z);
+            gl_PointSize = clamp(gl_PointSize, 1.0, 64.0);
+
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    `;
+
+    const splatFragmentShader = `
+        varying vec3 vColor;
+        varying float vOpacity;
+
+        void main() {
+            // Circular point with soft edge (Gaussian-like)
+            vec2 center = gl_PointCoord - vec2(0.5);
+            float dist = length(center) * 2.0;
+
+            // Gaussian falloff
+            float alpha = exp(-dist * dist * 2.0) * vOpacity;
+
+            if (alpha < 0.01) discard;
+
+            gl_FragColor = vec4(vColor, alpha);
+        }
+    `;
+
+    // ============================================================================
+    // PLY Loader for 3DGS
+    // ============================================================================
+
+    async function loadGaussianPLY(buffer, onProgress) {
+        const decoder = new TextDecoder();
+        const headerText = decoder.decode(buffer.slice(0, 8192));
+        const headerEndIdx = headerText.indexOf('end_header');
+        if (headerEndIdx === -1) throw new Error('Invalid PLY: no end_header');
+
+        const header = headerText.slice(0, headerEndIdx);
+
+        // Find the actual byte position of data start (after end_header\n)
+        let dataStart = headerEndIdx + 'end_header'.length;
+        // Skip newline character(s)
+        const headerBytes = new Uint8Array(buffer.slice(0, dataStart + 2));
+        while (dataStart < headerBytes.length && (headerBytes[dataStart] === 10 || headerBytes[dataStart] === 13)) {
+            dataStart++;
+        }
+
+        console.log(`PLY header ends at byte ${headerEndIdx}, data starts at byte ${dataStart}`);
+
+        // Parse vertex count
+        const vertexMatch = header.match(/element vertex (\d+)/);
+        if (!vertexMatch) throw new Error('Invalid PLY: no vertex count');
+        const numVertices = parseInt(vertexMatch[1]);
+
+        console.log(`Parsing ${numVertices} Gaussians...`);
+        onProgress?.(0, `Parsing ${numVertices.toLocaleString()} Gaussians...`);
+
+        // Parse properties
+        const props = [];
+        const propRegex = /property (\w+) (\w+)/g;
+        let match;
+        while ((match = propRegex.exec(header)) !== null) {
+            props.push({ type: match[1], name: match[2] });
+        }
+
+        const isBinary = header.includes('binary_little_endian');
+
+        // Allocate output arrays
+        const positions = new Float32Array(numVertices * 3);
+        const colors = new Float32Array(numVertices * 3);
+        const sizes = new Float32Array(numVertices);
+        const opacities = new Float32Array(numVertices);
+
+        if (isBinary) {
+            // Calculate byte stride and offsets for each property
+            let stride = 0;
+            const propOffsets = {};
+            for (const p of props) {
+                propOffsets[p.name] = stride;
+                if (p.type === 'float') stride += 4;
+                else if (p.type === 'double') stride += 8;
+                else if (p.type === 'uchar' || p.type === 'uint8') stride += 1;
+                else if (p.type === 'int' || p.type === 'uint') stride += 4;
+                else if (p.type === 'short' || p.type === 'ushort') stride += 2;
+                else stride += 4; // default to 4 bytes
+            }
+
+            console.log(`PLY stride: ${stride} bytes, properties:`, Object.keys(propOffsets).length);
+            console.log('Property offsets:', propOffsets);
+
+            const data = new DataView(buffer, dataStart);
+            console.log(`DataView: byteOffset=${dataStart}, byteLength=${data.byteLength}`);
+
+            // Debug first vertex
+            console.log('First vertex raw bytes (first 24):',
+                Array.from(new Uint8Array(buffer.slice(dataStart, dataStart + 24)))
+                    .map(b => b.toString(16).padStart(2, '0')).join(' '));
+            console.log('First vertex x,y,z:',
+                data.getFloat32(0, true),
+                data.getFloat32(4, true),
+                data.getFloat32(8, true));
+            const SH_C0 = 0.28209479177387814;
+
+            for (let i = 0; i < numVertices; i++) {
+                const base = i * stride;
+
+                // Position - check bounds
+                if (base + propOffsets.z + 4 > data.byteLength) {
+                    console.warn(`Truncated at vertex ${i}`);
+                    break;
+                }
+
+                positions[i * 3] = data.getFloat32(base + propOffsets.x, true);
+                positions[i * 3 + 1] = data.getFloat32(base + propOffsets.y, true);
+                positions[i * 3 + 2] = data.getFloat32(base + propOffsets.z, true);
+
+                // Scale -> point size (use average of 3 scales)
+                let avgScale = 0.01;
+                if ('scale_0' in propOffsets) {
+                    const s0 = Math.exp(data.getFloat32(base + propOffsets.scale_0, true));
+                    const s1 = Math.exp(data.getFloat32(base + propOffsets.scale_1, true));
+                    const s2 = Math.exp(data.getFloat32(base + propOffsets.scale_2, true));
+                    avgScale = (s0 + s1 + s2) / 3;
+                }
+                sizes[i] = Math.min(Math.max(avgScale * 100, 0.1), 5); // Scale for visibility
+
+                // Color from SH DC coefficients
+                if ('f_dc_0' in propOffsets) {
+                    const r = 0.5 + SH_C0 * data.getFloat32(base + propOffsets.f_dc_0, true);
+                    const g = 0.5 + SH_C0 * data.getFloat32(base + propOffsets.f_dc_1, true);
+                    const b = 0.5 + SH_C0 * data.getFloat32(base + propOffsets.f_dc_2, true);
+                    colors[i * 3] = Math.max(0, Math.min(1, r));
+                    colors[i * 3 + 1] = Math.max(0, Math.min(1, g));
+                    colors[i * 3 + 2] = Math.max(0, Math.min(1, b));
+                } else if ('red' in propOffsets) {
+                    colors[i * 3] = data.getUint8(base + propOffsets.red) / 255;
+                    colors[i * 3 + 1] = data.getUint8(base + propOffsets.green) / 255;
+                    colors[i * 3 + 2] = data.getUint8(base + propOffsets.blue) / 255;
+                } else {
+                    colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = 0.7;
+                }
+
+                // Opacity (sigmoid of raw value)
+                if ('opacity' in propOffsets) {
+                    const raw = data.getFloat32(base + propOffsets.opacity, true);
+                    opacities[i] = 1 / (1 + Math.exp(-raw));
+                } else {
+                    opacities[i] = 0.8;
+                }
+
+                // Check for NaN on first few and report
+                if (i < 5 || (isNaN(positions[i*3]) && i < 1000)) {
+                    console.log(`Vertex ${i}: pos=(${positions[i*3].toFixed(2)}, ${positions[i*3+1].toFixed(2)}, ${positions[i*3+2].toFixed(2)}), size=${sizes[i].toFixed(3)}, opacity=${opacities[i].toFixed(2)}`);
+                }
+
+                // Progress update every 50k points
+                if (i % 50000 === 0 && i > 0) {
+                    onProgress?.(i / numVertices, `Loaded ${(i/1000).toFixed(0)}k / ${(numVertices/1000).toFixed(0)}k`);
+                    await new Promise(r => setTimeout(r, 0)); // Yield to UI
+                }
+            }
+
+            // Check for NaN/Inf and replace with 0 (or filter out bad vertices)
+            let nanCount = 0;
+            let infCount = 0;
+            for (let i = 0; i < positions.length; i++) {
+                if (isNaN(positions[i])) {
+                    positions[i] = 0;
+                    nanCount++;
+                } else if (!isFinite(positions[i]) || Math.abs(positions[i]) > 1e6) {
+                    positions[i] = 0;
+                    infCount++;
+                }
+            }
+            console.log(`Fixed: ${nanCount} NaN, ${infCount} Inf/huge values in positions`);
+        } else {
+            // ASCII PLY (slower)
+            const text = decoder.decode(buffer);
+            const lines = text.split('\n');
+            const dataLines = lines.slice(lines.indexOf('end_header') + 1);
+
+            for (let i = 0; i < numVertices && i < dataLines.length; i++) {
+                const vals = dataLines[i].trim().split(/\s+/).map(parseFloat);
+                if (vals.length < 3) continue;
+
+                positions[i * 3] = vals[0];
+                positions[i * 3 + 1] = vals[1];
+                positions[i * 3 + 2] = vals[2];
+                colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = 0.7;
+                sizes[i] = 0.5;
+                opacities[i] = 0.8;
+            }
+        }
+
+        onProgress?.(1, 'Creating mesh...');
+
+        return { positions, colors, sizes, opacities, count: numVertices };
+    }
+
+    function createSplatMesh(data) {
+        // Remove old mesh
+        if (splatMesh) {
+            scene.remove(splatMesh);
+            splatMesh.geometry.dispose();
+            splatMesh.material.dispose();
+        }
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
+        geometry.setAttribute('customColor', new THREE.Float32BufferAttribute(data.colors, 3));
+        geometry.setAttribute('size', new THREE.Float32BufferAttribute(data.sizes, 1));
+        geometry.setAttribute('opacity', new THREE.Float32BufferAttribute(data.opacities, 1));
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader: splatVertexShader,
+            fragmentShader: splatFragmentShader,
+            transparent: true,
+            depthWrite: false,
+            blending: THREE.NormalBlending,
+        });
+
+        splatMesh = new THREE.Points(geometry, material);
+        scene.add(splatMesh);
+
+        splatCount = data.count;
+        document.getElementById('splat-count').textContent = splatCount.toLocaleString();
+
+        // Center camera on model
+        geometry.computeBoundingSphere();
+        if (geometry.boundingSphere) {
+            const center = geometry.boundingSphere.center;
+            const radius = geometry.boundingSphere.radius;
+            controls.target.copy(center);
+            camera.position.set(center.x, center.y + radius * 0.5, center.z + radius * 2);
+            controls.update();
+        }
+    }
+
+    // ============================================================================
+    // File Loading
+    // ============================================================================
+
+    function showLoading(show) {
+        document.getElementById('loading').classList.toggle('hidden', !show);
+    }
+
+    function updateProgress(progress, text) {
+        document.getElementById('progress').style.width = `${progress * 100}%`;
+        document.getElementById('load-status').textContent = text || '';
+    }
+
+    async function loadFile(file) {
+        showLoading(true);
+        updateProgress(0, 'Reading file...');
+
+        try {
+            const buffer = await file.arrayBuffer();
+            const data = await loadGaussianPLY(buffer, updateProgress);
+            createSplatMesh(data);
+            document.getElementById('status').textContent = `Loaded ${splatCount.toLocaleString()} Gaussians`;
+        } catch (err) {
+            console.error(err);
+            document.getElementById('status').textContent = 'Error: ' + err.message;
+        }
+
+        showLoading(false);
+    }
+
+    async function loadURL(url) {
+        showLoading(true);
+        updateProgress(0, 'Fetching...');
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const buffer = await response.arrayBuffer();
+            const data = await loadGaussianPLY(buffer, updateProgress);
+            createSplatMesh(data);
+            document.getElementById('status').textContent = `Loaded ${splatCount.toLocaleString()} Gaussians`;
+        } catch (err) {
+            console.error(err);
+            document.getElementById('status').textContent = 'Error: ' + err.message;
+        }
+
+        showLoading(false);
+    }
+
+    // File input
+    document.getElementById('file-input').addEventListener('change', (e) => {
+        if (e.target.files[0]) loadFile(e.target.files[0]);
+    });
+
+    // URL load
+    document.getElementById('load-url-btn').addEventListener('click', () => {
+        const url = document.getElementById('url-input').value.trim();
+        if (url) loadURL(url);
+    });
+
+    // Drag and drop
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const file = e.dataTransfer.files[0];
+        if (file && (file.name.endsWith('.ply') || file.name.endsWith('.splat'))) {
+            loadFile(file);
+        }
+    });
+
+    // ============================================================================
+    // WebXR Setup
+    // ============================================================================
+
+    async function initXR() {
+        const xrStatus = document.getElementById('xr-status');
+
+        if (!('xr' in navigator)) {
+            xrStatus.textContent = 'WebXR not available';
+            return;
+        }
+
+        // Check VR support
+        try {
+            const vrSupported = await navigator.xr.isSessionSupported('immersive-vr');
+            if (vrSupported) {
+                document.getElementById('vr-btn').disabled = false;
+                document.getElementById('vr-btn').addEventListener('click', () => {
+                    const btn = VRButton.createButton(renderer);
+                    btn.click();
+                });
+            }
+        } catch (e) {
+            console.log('VR check failed:', e);
+        }
+
+        // Check AR support
+        try {
+            const arSupported = await navigator.xr.isSessionSupported('immersive-ar');
+            if (arSupported) {
+                document.getElementById('ar-btn').disabled = false;
+                document.getElementById('ar-btn').addEventListener('click', () => {
+                    const btn = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+                    btn.click();
+                });
+            }
+        } catch (e) {
+            console.log('AR check failed:', e);
+        }
+
+        const vrOk = !document.getElementById('vr-btn').disabled;
+        const arOk = !document.getElementById('ar-btn').disabled;
+        xrStatus.textContent = vrOk || arOk
+            ? `Available: ${vrOk ? 'VR' : ''} ${arOk ? 'AR' : ''}`
+            : 'No XR available';
+    }
+
+    // VR Controllers
+    const controllerModelFactory = new XRControllerModelFactory();
+    const controller1 = renderer.xr.getController(0);
+    const controller2 = renderer.xr.getController(1);
+    scene.add(controller1);
+    scene.add(controller2);
+
+    const grip1 = renderer.xr.getControllerGrip(0);
+    grip1.add(controllerModelFactory.createControllerModel(grip1));
+    scene.add(grip1);
+
+    const grip2 = renderer.xr.getControllerGrip(1);
+    grip2.add(controllerModelFactory.createControllerModel(grip2));
+    scene.add(grip2);
+
+    // ============================================================================
+    // Animation Loop
+    // ============================================================================
+
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+
+    function animate() {
+        controls.update();
+        renderer.render(scene, camera);
+    }
+
+    renderer.setAnimationLoop(() => {
+        frameCount++;
+        animate();
+    });
+
+    // FPS counter
+    setInterval(() => {
+        const now = performance.now();
+        const fps = frameCount / ((now - lastFpsTime) / 1000);
+        document.getElementById('fps').textContent = fps.toFixed(0);
+        frameCount = 0;
+        lastFpsTime = now;
+    }, 1000);
+
+    // ============================================================================
+    // Resize Handler
+    // ============================================================================
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // ============================================================================
+    // Initialize
+    // ============================================================================
+
+    initXR();
+
+    // Auto-load from URL params
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('ply')) {
+        loadURL(params.get('ply'));
+    }
+
+    console.log('Gaussian Splat VR Viewer ready');
+    console.log('Quest 3 setup: adb reverse tcp:8080 tcp:8080');
+    </script>
+</body>
+</html>

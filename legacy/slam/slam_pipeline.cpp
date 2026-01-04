@@ -415,6 +415,42 @@ TensorDict SLAMPipeline::runRaycastByCam(const Camera &cam, bool use_cam_depth)
     return raycast_res;
 }
 
+TensorDict SLAMPipeline::getLiveRaycast(const Camera &cam)
+{
+    // Use the live raycast from renderState_live
+    // This is more reliable for online mode than custom pose raycasting
+    TensorDict raycast_res;
+
+    auto* basicEngine = dynamic_cast<ITMBasicEngine<ITMVoxel, ITMVoxelIndex> *>(main_engine);
+
+    // Call runRaycast with NULL to render color image into renderState_live
+    // (CreateICPMaps during tracking only does depth raycast, not color)
+    basicEngine->runRaycast(NULL, NULL);
+
+    // Now get the live raycast data with color
+    ITMUChar4Image* live_color = basicEngine->GetLiveImage();
+    ITMFloat4Image* live_vertex = basicEngine->GetLiveVertex();
+
+    // Convert to tensors
+    torch::Tensor color_tensor = ITMUChar4ImageToTensor(live_color);
+    torch::Tensor vertex_conf_tensor = ITMUFloat4ImageToTensor(live_vertex);
+    torch::Tensor vertex_tensor = vertex_conf_tensor.slice(2, 0, 3).contiguous() * voxel_size;
+    torch::Tensor conf_tensor = vertex_conf_tensor.slice(2, 3, 4).contiguous();
+
+    raycast_res["color_map"] = color_tensor;
+    raycast_res["vertex_map"] = vertex_tensor;
+    raycast_res["confidence_map"] = conf_tensor;
+
+    // Compute depth from vertices using current camera pose
+    torch::Tensor w2c = poseInv(cam.c2w).to(device);
+    torch::Tensor transformed_vertices = verticesTransform(vertex_tensor, w2c);
+    raycast_res["depth_map"] = transformed_vertices.index({torch::indexing::Slice(), torch::indexing::Slice(), 2}).unsqueeze(-1).contiguous();
+    torch::Tensor invalid_vertex_mask = (vertex_tensor.sum(2) == 0).unsqueeze(-1);
+    raycast_res["depth_map"].masked_fill_(invalid_vertex_mask, 0);
+
+    return raycast_res;
+}
+
 void SLAMPipeline::localFrameRaycast()
 {
     // 更新raycast results
